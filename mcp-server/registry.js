@@ -277,10 +277,48 @@ const TOOL_SCHEMAS = {
   getWorkflow: { type: 'object', properties: {} },
 }
 
+// ==================== 工作流守卫（反馈：硬性防绕过） ====================
+// 任何状态相关工具被调用前，先按 pipeline_state.json 校验前置步骤是否完成。
+// 失败直接抛带码错误，agent 收到后自我纠正——系统不会执行越序操作。
+// 仅对「有前置依赖」的工具设防；无依赖工具（parseScript/getWorkflow/submitPage 等）默认放行。
+function guardTool(name, state) {
+  const st = state || {}
+  const done = (step) => st[`${step.toLowerCase()}_status`] === 'SUCCEEDED' || st.steps?.[step]?.status === 'SUCCEEDED'
+  switch (name) {
+    case 'render':
+      // 硬性前提：未对齐（VOICEOVER/时间轴未完成）绝不允许渲染。
+      // 语义步为建议性（可由 agent 经 applyCreative/aiApplyFix 增强），不作为渲染硬阻断，
+      // 以免阻塞正常 run/apply-fixes 后出片路径。
+      if (!done('timeline') && !done('voiceover')) {
+        return { ok: false, code: 'RENDER_NOT_ALLOWED', message: 'VOICEOVER/时间轴未对齐完成，禁止渲染（请先 alignDP）' }
+      }
+      return { ok: true }
+    case 'applyCreative':
+    case 'aiApplyFix':
+      if (!done('timeline') && !done('voiceover')) {
+        return { ok: false, code: 'STEP_NOT_READY', message: 'VOICEOVER/时间轴未对齐完成，先运行对齐再写回创意/修正' }
+      }
+      return { ok: true }
+    case 'aiReview':
+      if (!st.align_result && !st.mapping_meta) {
+        return { ok: false, code: 'ALIGN_FIRST', message: '需先 alignDP 产出 mapping，才能 aiReview' }
+      }
+      return { ok: true }
+    default:
+      return { ok: true }
+  }
+}
+
 // 统一分发（所有传输 HTTP/WS/stdio 都经此调用，确立单一核心 API）
 async function dispatchTool(name, args = {}) {
   const tool = TOOLS[name]
   if (!tool) throw new Error(`工具不存在: ${name}`)
+  const guard = guardTool(name, await readPipelineState())
+  if (!guard.ok) {
+    const err = new Error(`[GUARD:${guard.code}] ${guard.message}`)
+    err.code = guard.code
+    throw err
+  }
   return await tool(args)
 }
 

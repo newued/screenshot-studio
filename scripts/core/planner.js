@@ -9,16 +9,12 @@
 
 import { callTool } from './client.js'
 import { patchState, persistArtifact } from './state.js'
-import { PROJECT_STATUS } from '../../src/lib/pipelineContract.js'
+import { PROJECT_STATUS, buildProductionPlan } from '../../src/lib/pipelineContract.js'
 import { buildProject, buildScriptText } from './project.js'
 
-// 计划定义（决策 Schema / 约束集中在此，而非散落 prompt）
-export const PRODUCTION_PLAN = [
-  { key: 'SCRIPT', tool: 'parseScript', artifact: 'SCRIPT', needsAudio: false },
-  { key: 'VOICEOVER', tool: 'alignDP', artifact: 'VOICEOVER', needsReview: true },
-  { key: 'SEMANTIC', tool: 'aiReview', artifact: 'SEMANTIC', optional: true },
-  { key: 'RENDER', tool: 'render', artifact: 'RENDER' },
-]
+// 计划定义从单一工作流契约派生（pipelineContract.WORKFLOW_STEPS），
+// 保证与 STEP_ORDER 永远一致，杜绝 TIMELINE 被漏掉这类漂移。
+export const PRODUCTION_PLAN = buildProductionPlan()
 
 // 运行生产计划（人机协同）。输入已解析好的素材。
 // 每步进入 RUNNING；失败则把当前步标记为 FAILED 并记录 error（反馈⑧：生产级状态机）。
@@ -61,6 +57,8 @@ export async function runProductionPlan({
       asr_quality_score: align.asr_quality_score,
       mapping_meta: align.mapping_meta,
       beat_grid_len: (align.beat_grid || []).length,
+      // TIMELINE 由 alignDP 的 mapping 产出（派生步），此处一并标记完成，消除步骤定义漂移
+      timeline_status: PROJECT_STATUS.SUCCEEDED,
     })
     await persistArtifact(statePath, projectId, 'VOICEOVER', align)
 

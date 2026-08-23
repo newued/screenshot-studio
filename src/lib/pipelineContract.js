@@ -8,6 +8,34 @@
 
 export const STEP_ORDER = ['SCRIPT', 'VOICEOVER', 'TIMELINE', 'SEMANTIC', 'RENDER']
 
+// 单一工作流契约（反馈：消除 SKILL/AGENTS/Planner 中多份 Workflow 定义漂移）
+// 这是「步骤顺序 + 每步工具 + 依赖」的唯一真相源；planner 的 PRODUCTION_PLAN 必须由此派生，
+// 不得再硬编码一份步骤列表（此前 TIMELINE 在 planner 中被漏掉即此问题）。
+// - tool:       该步对应的 MCP 工具（null 表示由上游步骤产出、无独立工具）
+// - needsReview: 该步可能产出 AI 语义交接包（交由 agent 仲裁）
+// - derived:    true 表示该步不独立执行，其产物由上游步骤（producedBy）生成
+// - producedBy: derived 步骤的实际产出步骤
+export const WORKFLOW_STEPS = {
+  SCRIPT:    { tool: 'parseScript', needsReview: false },
+  VOICEOVER: { tool: 'alignDP', needsReview: true },
+  TIMELINE:  { derived: true, producedBy: 'VOICEOVER', note: '时间轴由 alignDP 的 mapping 产出，确认门在 UI/agent 审阅对齐结果' },
+  SEMANTIC:  { tool: 'aiReview', optional: true, needsReview: true },
+  RENDER:    { tool: 'render', needsReview: false },
+}
+
+// 由单一契约派生「执行计划」（planner 使用，保证与 STEP_ORDER 永远一致）
+export function buildProductionPlan() {
+  return STEP_ORDER.map((key) => ({
+    key,
+    tool: WORKFLOW_STEPS[key].tool || null,
+    derived: !!WORKFLOW_STEPS[key].derived,
+    producedBy: WORKFLOW_STEPS[key].producedBy || null,
+    needsReview: !!WORKFLOW_STEPS[key].needsReview,
+    optional: !!WORKFLOW_STEPS[key].optional,
+    artifact: STEP_ARTIFACTS[key] || null,
+  }))
+}
+
 export const STEP_LABELS = {
   SCRIPT: '脚本',
   VOICEOVER: '配音',

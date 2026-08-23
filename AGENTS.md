@@ -90,3 +90,9 @@
 - 项目目录：`<root>/projects/<project_id>/artifacts/`；每步产物为不可变文件：`script.json`/`voiceover.json`/`effects.json`/`final.mp4`，路径登记回 `pipeline_state.json.artifacts[step]`。
 - 创意决策写回（`applyCreative`）支持：`index/id` + `sticker`(须在表情库) + `effect`(须在枚举) + `display_start/end` + 可选 `emotion/semantic/reason/confidence`；校验失败直接抛错，无静默兜底。
 - **多项目并发 / 整目录迁移**尚未做：浏览器轮询路径仍按单个 `pipeline_state.json`，后续做需把前端 `project_id` 参数化（独立一轮，勿在传输层偷塞）。
+
+### 6.5 单一工作流契约 + MCP 守卫（防漂移 / 防绕过）
+- **唯一工作流定义**：`src/lib/pipelineContract.js` 的 `STEP_ORDER` + `WORKFLOW_STEPS` 是步骤顺序/工具/依赖的唯一真相源。**禁止在 SKILL.md / AGENTS.md / planner 中再硬编码一份步骤列表**（此前 `planner.PRODUCTION_PLAN` 漏掉 `TIMELINE` 即此问题）。`planner.PRODUCTION_PLAN` 由 `buildProductionPlan()` 从契约派生。
+- **TIMELINE 是派生步**：时间轴由 `VOICEOVER/alignDP` 的 mapping 产出，`planner` 在 alignDP 成功后标记 `timeline_status: SUCCEEDED`，不单独执行工具。
+- **MCP 守卫（硬性防绕过）**：`mcp-server/registry.js` 的 `guardTool` 在每次 `dispatchTool` 前按 `pipeline_state.json` 校验前置步骤；越序调用（如未对齐就 `render`、未对齐就 `applyCreative`/`aiApplyFix`、未 `alignDP` 就 `aiReview`）会抛 `[GUARD:<CODE>]` 错误并拒绝执行。agent 收到错误后自我纠正。
+- **原则**：规则从「请 Agent 遵守」逐步转为「Runtime 不允许违反」。SKILL.md 只告诉 Agent 怎么做/何时问用户；流程约束由 State + Guard 在运行时强制。
