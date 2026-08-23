@@ -42,39 +42,17 @@ import { PROJECT_STATUS } from '../src/lib/pipelineContract.js'
 import { readState, writeState, patchState } from './core/state.js'
 import { buildProject, buildScriptText } from './core/project.js'
 import { applyDecisionsToMessages, scoreEmotion, pickSticker, STICKER_THRESHOLD } from './core/decisions.js'
+import { callTool, health } from './core/client.js'
+import { runProductionPlan, cancelProductionPlan } from './core/planner.js'
 
 const __dirname = dirname(fileURLToPath(import.meta.url))
 const ROOT = resolve(__dirname, '..')
-const PORT = 9527
-const BASE = `http://127.0.0.1:${PORT}/api`
 const SERVER_ENTRY = join(ROOT, 'mcp-server', 'index.js')
 const STATE_PATH = join(ROOT, 'pipeline_state.json')
 const DEV_PORT = 5173
 
 const log = (...a) => console.log('[agent-bridge]', ...a)
 const err = (...a) => console.error('[agent-bridge]', ...a)
-
-// ====================== MCP HTTP 调用 ======================
-async function callTool(tool, params = {}) {
-  const res = await fetch(`${BASE}/tool/${tool}`, {
-    method: 'POST',
-    headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify(params),
-  })
-  const data = await res.json().catch(() => ({}))
-  if (data.error) throw new Error(`tool ${tool} failed: ${data.error}`)
-  return data
-}
-
-async function health() {
-  try {
-    const res = await fetch(`${BASE}/health`, { signal: AbortSignal.timeout(2000) })
-    const data = await res.json()
-    return data.status === 'ok'
-  } catch {
-    return false
-  }
-}
 
 // ====================== 生命周期 ======================
 async function ensureServer() {
@@ -131,64 +109,20 @@ async function cmdRun(args) {
   if (!audio) throw new Error('run 需要 --audio <音频路径或URL>')
   if (!script) throw new Error('run 需要 --script <脚本文本>')
 
-  patchState({ current_step: 'SCRIPT', status: PROJECT_STATUS.RUNNING, pipeline: 'parseScript→alignDP' + (skipRender ? '' : '→render') })
-
-  // Stage 1: parseScript
-  log('parseScript ...')
-  const parse = await callTool('parseScript', { scriptText: script, platform, mode })
-  const messages = parse.messages || []
-  parse.messages = messages
-  patchState({ current_step: 'SCRIPT', script_messages: messages, script_text: script, platform, mode })
-
-  // Stage 2: alignDP (节拍网格 + faster-whisper + DP)
-  log('alignDP ...')
-  const align = await callTool('alignDP', { audioPath: audio, scriptText: script, model: 'small', hopLength: 512 })
-  patchState({
-    current_step: 'VOICEOVER',
-    alignment_mode: align.alignment_mode,
-    asr_quality_score: align.asr_quality_score,
-    mapping_meta: align.mapping_meta,
-    beat_grid_len: (align.beat_grid || []).length,
-  })
-
-  // Stage 3: needs AI 语义干预？
-  const needsReview = align.mapping_meta?.needs_review
-  if (needsReview) {
-    // 无 --decisions 自动通过分支，直接交 agent 干预（人机协同流程）
-    log('检测到 needs_review，取 AI 交接包（交由 agent 自带 LLM 做语义归位）...')
-    const handoff = await callTool('aiReview', {
-      scriptText: script,
-      beatGrid: align.beat_grid,
-      rawSegments: align.asr_segments || [],
-      mapping: align.mapping,
-    })
-    patchState({
-      current_step: 'SEMANTIC',
-      needs_review: true,
-      ai_handoff: handoff,
-      align_result: align,
-      script_text: script,
-      platform,
-      mode,
-      audio_path: audio,
-    })
-    // 打印交接包给调用方（agent）
+  // 委托给 Planner（scripts/core/planner.js）执行生产计划
+  const res = await runProductionPlan({ statePath: STATE_PATH, projectId: 'default', audioPath: audio, scriptText: script, platform, mode, out, skipRender })
+  if (res.needsReview) {
     console.log('\n=== AI_HANDOFF_JSON ===')
-    console.log(JSON.stringify({ align_result: align, handoff }, null, 2))
+    console.log(JSON.stringify(res.handoff, null, 2))
     console.log('=== END_AI_HANDOFF ===\n')
     err('需要 AI 语义干预：请 agent 基于上面 AI_HANDOFF_JSON 产出 fixes，再调 `apply-fixes`。')
     process.exitCode = 2
     return
   }
-
-  // Stage 4: render
-  if (skipRender) {
-    patchState({ current_step: 'TIMELINE', status: PROJECT_STATUS.SUCCEEDED, align_result: align })
+  if (res.skipped) {
     log('已跳过 render（--skip-render）。align 结果见 pipeline_state.json。')
     return
   }
-  await renderStage({ align, parse, script, audio, out, platform, mode })
-  patchState({ current_step: 'RENDER', status: PROJECT_STATUS.SUCCEEDED, output: out })
   log('完成，输出：', out)
 }
 
@@ -260,11 +194,8 @@ async function cmdRunPage(args) {
   const platform = args['--platform'] || 'wechat'
   const mode = args['--mode'] || 'single'
   const out = args['--out'] || join(homedir(), 'Downloads', 'screenshot-studio', `agent-page-${Date.now()}.mp4`)
-  const timeoutMs = parseInt(args['--timeout'] || '600000', 10)
 
-  // 1) 读取网页用户已确认提交的真相源。
-  // 约定：open 注入脚本后 agent 立即把对话交还用户；用户手动在网页微调/选配音/点「确认页面信息」后，
-  // 回到对话告诉 agent「信息已确认」，agent 再调本命令。这里只读取用户最新提交的脚本/头像/名称/配音，不阻塞轮询。
+  // 读取网页用户已确认提交的真相源（page_confirmed 守卫，反馈⑨的硬约束）。
   const state = readState()
   if (!(state?.page_confirmed && state?.audio_path)) {
     throw new Error('网页尚未确认：请先打开 UI、选配音并点「确认页面信息」，再回来说「信息已确认」。')
@@ -275,49 +206,20 @@ async function cmdRunPage(args) {
   const members = state.members || []
   const scriptText = buildScriptText(messages)
 
-  // 2) alignDP（节拍网格 + faster-whisper + DP 对齐）
-  patchState({ current_step: 'SCRIPT', status: PROJECT_STATUS.RUNNING, script_messages: messages, members, audio_path: audio, platform, mode })
-  log('alignDP ...')
-  const align = await callTool('alignDP', { audioPath: audio, scriptText, model: 'small', hopLength: 512 })
-  patchState({ current_step: 'VOICEOVER', alignment_mode: align.alignment_mode, asr_quality_score: align.asr_quality_score, mapping_meta: align.mapping_meta })
-
-  // 3) 需要 AI 语义干预？
-  if (align.mapping_meta?.needs_review) {
-    log('needs_review，取 AI 交接包（交由 agent 自带 LLM 做语义归位）...')
-    const handoff = await callTool('aiReview', {
-      scriptText,
-      beatGrid: align.beat_grid,
-      rawSegments: align.asr_segments || [],
-      mapping: align.mapping,
-    })
-    patchState({
-      current_step: 'SEMANTIC',
-      needs_review: true,
-      ai_handoff: handoff,
-      align_result: align,
-      script_text: scriptText,
-      platform,
-      mode,
-      audio_path: audio,
-      output: out,
-      members,
-    })
+  // 委托给 Planner 执行（页面模式同样走统一生产计划）
+  const res = await runProductionPlan({ statePath: STATE_PATH, projectId: state.project_id || 'default', audioPath: audio, scriptText, messages, members, platform, mode, out, skipRender: !!args['--skip-render'] })
+  if (res.needsReview) {
     console.log('\n=== AI_HANDOFF_JSON ===')
-    console.log(JSON.stringify({ align_result: align, handoff }, null, 2))
+    console.log(JSON.stringify(res.handoff, null, 2))
     console.log('=== END_AI_HANDOFF ===\n')
     err('需要 AI 语义干预：请 agent 基于交接包产出 fixes，再调 `apply-fixes`（会从状态自动取音频/输出）。')
     process.exitCode = 2
     return
   }
-
-  // 4) render
-  if (args['--skip-render']) {
-    patchState({ current_step: 'TIMELINE', status: PROJECT_STATUS.SUCCEEDED, align_result: align })
+  if (res.skipped) {
     log('已跳过 render（--skip-render）。')
     return
   }
-  await renderStage({ align, parse: { messages }, script: scriptText, audio, out, platform, mode, members })
-  patchState({ current_step: 'RENDER', status: PROJECT_STATUS.SUCCEEDED, output: out })
   log('完成，输出：', out)
 }
 
@@ -444,6 +346,10 @@ async function main() {
       break
     case 'status':
       cmdStatus()
+      break
+    case 'cancel':
+      cancelProductionPlan(STATE_PATH, args._[0])
+      log('已取消当前生产计划（CANCELLED）。')
       break
     case 'tag-stickers':
       cmdTagStickers(args)

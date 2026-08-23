@@ -63,3 +63,30 @@
 - ③ 之后 agent 不得自行续跑后端，必须先在 ④ 拿到用户明确答复。
 - 音画同步、语义驱动特效、可中断可继续等第 1~3 节要求，在分支 A/B 的后续步骤中同样强制满足。
 - **配音来源硬约束（不可动摇）**：配音（口播 / 歌曲）一律由**用户人工提供**——网页选配音风格并上传音频，或用户用外部 TTS 产出 MP3 后给 URL/路径。本工具**不内置、不自动合成音频**；任何实现都不得自行调用 TTS / 语音合成去生成配音。需要配音时，agent 只负责产出「TTS 提示词」交给用户去外部服务生成，再回传音频路径/URL。此条不是待补项，不要为「自动配音」写代码。
+
+## 6. 架构分层（实现者必读，防止回归）
+
+> 任何新增/修改都必须落在这套分层里，不得把职责塞回 `agent-bridge.mjs` 或 `index.js` 的传输层。
+
+### 6.1 单一状态契约（消除双状态词表）
+- `src/lib/pipelineContract.js` 是**唯一状态词表真相源**：`STEP_ORDER`、`UI_STATUS`（PENDING/AWAIT_CONFIRM/CONFIRMED/DONE）、`PROJECT_STATUS`（RUNNING/WAITING_USER/WAITING_AGENT/SUCCEEDED/FAILED/STALE/CANCELLED）、`STEP_ARTIFACTS`。
+- 浏览器 `src/lib/pipelineState.js` 与 agent 端均从它导入；**禁止在别处硬编码状态字符串**。
+- 活真相源仍是根目录 `pipeline_state.json`（浏览器轮询 `/api/state` 入口，不得改路径以免断握手）；`submitPage` 落盘 `page_confirmed/audio_path/messages/members`。
+
+### 6.2 单一 MCP 核心 API
+- `mcp-server/registry.js` 是**唯一工具注册表**（`TOOLS` + `TOOL_DESCRIPTIONS` + `TOOL_SCHEMAS` + `dispatchTool` + `listToolSpecs`）。
+- HTTP(`/api/tool/:name`)、WebSocket(`/ws`)、MCP-stdio 三种传输**都只经 `dispatchTool` 调用**，不得各自写分发。
+- `mcp-server/index.js` 只做传输层接线，不含工具实现。
+
+### 6.3 agent 端分层（`scripts/core/`）
+- `client.js`：MCP HTTP 客户端（`callTool`/`health`）。
+- `state.js`：真相源读写 + Project Entity 路径（`persistArtifact` → `projects/<id>/artifacts/<step>.json`）。
+- `project.js`：项目组装（`buildProject`/`buildScriptText`）。
+- `decisions.js`：LLM 创意决策合并 + 贴纸确定性兜底。
+- `planner.js`：生产计划 `PRODUCTION_PLAN` + 执行器 `runProductionPlan`（每步 RUNNING，失败标 FAILED，可 `cancelProductionPlan` 标 CANCELLED）。
+- `agent-bridge.mjs`：仅做生命周期 + CLI 分发（`run`/`run-page`/`apply-fixes`/`tag-stickers`/`status`/`cancel`），编排一律委托 `planner.js`。
+
+### 6.4 Project Entity 约定
+- 项目目录：`<root>/projects/<project_id>/artifacts/`；每步产物为不可变文件：`script.json`/`voiceover.json`/`effects.json`/`final.mp4`，路径登记回 `pipeline_state.json.artifacts[step]`。
+- 创意决策写回（`applyCreative`）支持：`index/id` + `sticker`(须在表情库) + `effect`(须在枚举) + `display_start/end` + 可选 `emotion/semantic/reason/confidence`；校验失败直接抛错，无静默兜底。
+- **多项目并发 / 整目录迁移**尚未做：浏览器轮询路径仍按单个 `pipeline_state.json`，后续做需把前端 `project_id` 参数化（独立一轮，勿在传输层偷塞）。

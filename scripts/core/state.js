@@ -4,6 +4,7 @@
 
 import { readFileSync, writeFileSync, mkdirSync } from 'node:fs'
 import { join, dirname } from 'node:path'
+import { writeFile } from 'node:fs/promises'
 import {
   STEP_ORDER,
   STEP_ARTIFACTS,
@@ -48,6 +49,24 @@ export function artifactPath(root, projectId, step) {
   const file = STEP_ARTIFACTS[step]
   if (!file) throw new Error(`未知步骤产物：${step}`)
   return join(artifactDir(root, projectId), file)
+}
+
+// 把某步产物作为不可变 artifact 落盘到 projects/<id>/artifacts/<step>.json
+// 同时把最新一份回写进 pipeline_state.json（保持浏览器轮询看到的活真相源不变）。
+export async function persistArtifact(statePath, projectId, step, data) {
+  const root = dirname(statePath) // <root>/pipeline_state.json → <root>
+  const dir = artifactDir(root, projectId)
+  mkdirSync(dir, { recursive: true })
+  const file = artifactPath(root, projectId, step)
+  await writeFile(file, JSON.stringify(data, null, 2), 'utf8')
+
+  // 回写活真相源（pipeline_state.json 仍是浏览器轮询入口，不破坏握手）
+  const s = readState(statePath) || {}
+  s.artifacts = s.artifacts || {}
+  s.artifacts[step] = file
+  s.updated_at = new Date().toISOString()
+  writeState(statePath, s)
+  return file
 }
 
 export { STEP_ORDER, STEP_ARTIFACTS, PROJECT_STATUS }
