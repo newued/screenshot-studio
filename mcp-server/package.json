@@ -1,0 +1,15 @@
+{
+  "name": "screenshort-mcp-server",
+  "version": "1.0.0",
+  "type": "module",
+  "description": "MCP Server for 截图工坊 - 提供原生 ASR/渲染/导出能力",
+  "main": "index.js",
+  "scripts": {
+    "start": "node index.js",
+    "dev": "node --watch index.js"
+  },
+  "dependencies": {
+    "@modelcontextprotocol/sdk": "^1.12.1",
+    "ws": "^8.18.0"
+  }
+}
