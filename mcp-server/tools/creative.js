@@ -63,8 +63,10 @@ function normSticker(s, set) {
 
 /**
  * applyCreative({ scriptMessages, creative })
- * creative: 数组，每条 { index, id?, sticker?, effect?, display_start?, display_end? }
+ * creative: 数组，每条 { index, id?, sticker?, effect?, display_start?, display_end?,
+ *                          emotion?, semantic?, reason?, confidence? }
  * 把 LLM 的创意决策写回 script_messages / messages，并标记 creative_reviewed。
+ * semantic/reason/confidence 为可选的结构化字段（反馈④：便于单条决策审阅/回改）。
  * 校验失败直接 throw —— 由调用方把错误提示回给用户。
  */
 export async function applyCreative({ scriptMessages, creative }) {
@@ -95,6 +97,10 @@ export async function applyCreative({ scriptMessages, creative }) {
       if (!EFFECT_ENUM.includes(c.effect)) errors.push(`动效「${c.effect}」不在枚举 ${EFFECT_ENUM.join('/')}。`)
       else m.effect = c.effect
     }
+    if (c.emotion != null) m.emotion = c.emotion
+    if (c.semantic != null && typeof c.semantic === 'object') m.semantic = c.semantic
+    if (c.reason != null) m.creative_reason = c.reason
+    if (c.confidence != null) m.creative_confidence = Number(c.confidence)
     if (c.display_start != null || c.display_end != null) {
       const ds = Number(c.display_start ?? m.display_start)
       const de = Number(c.display_end ?? m.display_end)

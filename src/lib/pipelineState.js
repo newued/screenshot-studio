@@ -1,43 +1,24 @@
-// 管线状态机（V1.1 设计文档第 3 节）
-// 状态枚举：PENDING → AWAIT_CONFIRM → CONFIRMED → DONE
+// 管线状态机（V1.2：统一状态契约）
+// 状态枚举：PENDING → AWAIT_CONFIRM → CONFIRMED → DONE（UI 向导门）
 // 步骤顺序：SCRIPT → VOICEOVER → TIMELINE → SEMANTIC → RENDER
 // 仅当前步 CONFIRMED 后解锁下一步；current_step 可回退。
 // 真相源：localStorage 中的 pipeline_state 对象 + 各步骤产物。
 // 会话中断/重开均从 localStorage 恢复。
+//
+// 注意：UI 步骤状态(UI_STATUS)与 agent 运行时状态(PROJECT_STATUS)已统一到
+// src/lib/pipelineContract.js，避免此前两套互不相通的状态词表。
 
-export const STEP_ORDER = ['SCRIPT', 'VOICEOVER', 'TIMELINE', 'SEMANTIC', 'RENDER']
+import {
+  STEP_ORDER,
+  UI_STATUS as STEP_STATUS,
+  STEP_LABELS,
+  STEP_DESCRIPTIONS,
+  STEP_ARTIFACTS,
+  PROJECT_STATUS,
+  markStaleAfter,
+} from './pipelineContract.js'
 
-export const STEP_STATUS = {
-  PENDING: 'PENDING',
-  AWAIT_CONFIRM: 'AWAIT_CONFIRM',
-  CONFIRMED: 'CONFIRMED',
-  DONE: 'DONE',
-}
-
-export const STEP_LABELS = {
-  SCRIPT: '脚本',
-  VOICEOVER: '配音',
-  TIMELINE: '时间轴',
-  SEMANTIC: '语义',
-  RENDER: '渲染',
-}
-
-export const STEP_DESCRIPTIONS = {
-  SCRIPT: '提示词 → AI 生成脚本 → 用户确认/编辑',
-  VOICEOVER: '配音提示词确认 + 配音生成/选择 + ASR 对齐',
-  TIMELINE: '时间轴确认 + 动效确认（可 nudge/shift 微调）',
-  SEMANTIC: '语义决策：贴纸/动效/转场审阅与修改',
-  RENDER: '最终视频生成（预览 + 导出）',
-}
-
-// 步骤产物文件名（对应设计文档目录结构中的 artifacts/）
-export const STEP_ARTIFACTS = {
-  SCRIPT: 'script.json',
-  VOICEOVER: 'voiceover.json',
-  TIMELINE: 'timeline.json',
-  SEMANTIC: 'effects.json',
-  RENDER: 'final.mp4',
-}
+export { STEP_ORDER, STEP_STATUS, STEP_LABELS, STEP_DESCRIPTIONS, STEP_ARTIFACTS }
 
 /**
  * 初始化管线状态
@@ -51,11 +32,11 @@ export function initState(projectId = '', mode = 'single') {
     mode,
     current_step: 'SCRIPT',
     steps: {
-      SCRIPT:    { status: STEP_STATUS.AWAIT_CONFIRM, artifact: null, edited: false },
-      VOICEOVER: { status: STEP_STATUS.PENDING,       artifact: null, edited: false },
-      TIMELINE:  { status: STEP_STATUS.PENDING,       artifact: null, edited: false },
-      SEMANTIC:  { status: STEP_STATUS.PENDING,       artifact: null, edited: false },
-      RENDER:    { status: STEP_STATUS.PENDING,       artifact: null, edited: false },
+      SCRIPT:    { status: STEP_STATUS.AWAIT_CONFIRM, project_status: PROJECT_STATUS.WAITING_USER, artifact: null, edited: false },
+      VOICEOVER: { status: STEP_STATUS.PENDING,       project_status: PROJECT_STATUS.PENDING,      artifact: null, edited: false },
+      TIMELINE:  { status: STEP_STATUS.PENDING,       project_status: PROJECT_STATUS.PENDING,      artifact: null, edited: false },
+      SEMANTIC:  { status: STEP_STATUS.PENDING,       project_status: PROJECT_STATUS.PENDING,      artifact: null, edited: false },
+      RENDER:    { status: STEP_STATUS.PENDING,       project_status: PROJECT_STATUS.PENDING,      artifact: null, edited: false },
     },
   }
 }
@@ -106,6 +87,7 @@ export function confirmStep(state, artifact = null) {
   newSteps[current] = {
     ...newSteps[current],
     status: STEP_STATUS.CONFIRMED,
+    project_status: PROJECT_STATUS.SUCCEEDED,
     artifact: artifact || newSteps[current].artifact,
     edited: false,
   }
@@ -117,10 +99,11 @@ export function confirmStep(state, artifact = null) {
     newSteps[nextStep] = {
       ...newSteps[nextStep],
       status: STEP_STATUS.AWAIT_CONFIRM,
+      project_status: PROJECT_STATUS.WAITING_USER,
     }
   } else {
     // 最后一步确认 → DONE
-    newSteps[current] = { ...newSteps[current], status: STEP_STATUS.DONE }
+    newSteps[current] = { ...newSteps[current], status: STEP_STATUS.DONE, project_status: PROJECT_STATUS.SUCCEEDED }
   }
 
   return {
@@ -147,22 +130,15 @@ export function backToStep(state, stepName) {
   newSteps[stepName] = {
     ...newSteps[stepName],
     status: STEP_STATUS.AWAIT_CONFIRM,
+    project_status: PROJECT_STATUS.WAITING_USER,
     edited: true,
   }
 
-  // 后续步骤回 PENDING（保留产物以供参考，但状态重置）
-  for (let i = targetIdx + 1; i < STEP_ORDER.length; i++) {
-    const s = STEP_ORDER[i]
-    newSteps[s] = {
-      ...newSteps[s],
-      status: STEP_STATUS.PENDING,
-    }
-  }
-
+  // 后续步骤失效（保留产物以供参考，但状态重置并标记 STALE）
   return {
     ...state,
     current_step: stepName,
-    steps: newSteps,
+    steps: markStaleAfter(newSteps, stepName),
   }
 }
 
@@ -182,20 +158,14 @@ export function editArtifact(state, stepName) {
   newSteps[stepName] = {
     ...newSteps[stepName],
     status: STEP_STATUS.AWAIT_CONFIRM,
+    project_status: PROJECT_STATUS.WAITING_USER,
     edited: true,
-  }
-  for (let i = stepIdx + 1; i < STEP_ORDER.length; i++) {
-    const s = STEP_ORDER[i]
-    newSteps[s] = {
-      ...newSteps[s],
-      status: STEP_STATUS.PENDING,
-    }
   }
 
   return {
     ...state,
     current_step: stepName,
-    steps: newSteps,
+    steps: markStaleAfter(newSteps, stepName),
   }
 }
 

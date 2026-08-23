@@ -34,12 +34,14 @@
  */
 
 import { spawn, execSync } from 'node:child_process'
-import { readFileSync, writeFileSync, existsSync, mkdirSync, rmSync, mkdtempSync } from 'node:fs'
-import { tmpdir, homedir } from 'node:os'
+import { readFileSync, mkdirSync } from 'node:fs'
+import { homedir } from 'node:os'
 import { join, resolve, dirname, isAbsolute } from 'node:path'
 import { fileURLToPath } from 'node:url'
-import { defaultMembers } from '../src/data/avatars.js'
-import { EFFECTS_CATALOG } from '../src/lib/effectsCatalog.js'
+import { PROJECT_STATUS } from '../src/lib/pipelineContract.js'
+import { readState, writeState, patchState } from './core/state.js'
+import { buildProject, buildScriptText } from './core/project.js'
+import { applyDecisionsToMessages, scoreEmotion, pickSticker, STICKER_THRESHOLD } from './core/decisions.js'
 
 const __dirname = dirname(fileURLToPath(import.meta.url))
 const ROOT = resolve(__dirname, '..')
@@ -116,91 +118,7 @@ function openUI(opts = {}) {
   return url
 }
 
-// ====================== 真相源 ======================
-function readState() {
-  try {
-    return JSON.parse(readFileSync(STATE_PATH, 'utf8'))
-  } catch {
-    return null
-  }
-}
-function writeState(state) {
-  writeFileSync(STATE_PATH, JSON.stringify(state, null, 2), 'utf8')
-  log('已写 pipeline_state.json')
-}
-function patchState(patch) {
-  const s = readState() || {}
-  const next = { ...s, ...patch, updated_at: new Date().toISOString() }
-  writeState(next)
-  return next
-}
-
-// ====================== 项目组装 ======================
-function buildProject({ parse, align, opts }) {
-  // 时间窗从 mapping 派生（语义仲裁写回 rap_span/proposed_at），不再依赖可能过时的 timeline
-  const mapping = align.mapping || align.timeline || []
-  const dur = align.duration || 0
-  const messages = (parse.messages || []).map((m, i) => {
-    const mp = mapping[i] || {}
-    const rap = mp.rap_span || null
-    const hasSpan = !!(rap && rap.start != null && rap.end != null)
-    let ds = rap && rap.start != null ? +rap.start : (mp.proposed_at != null ? +mp.proposed_at : (m.display_start != null ? +m.display_start : null))
-    let de = rap && rap.end != null ? +rap.end : (m.display_end != null ? +m.display_end : null)
-    if (ds == null) ds = 0
-    // 显式设置了 rap_span(start+end) 的（matched 或人工仲裁的 unmatched）原样保留；
-    // 仅 unmatched 无 end 的，用「下一条 start」或「音频时长」兜底，避免零宽
-    let explicitEnd = hasSpan
-    if (de == null || de <= ds) {
-      const nextDs = (mapping[i + 1] && (mapping[i + 1].rap_span?.start ?? mapping[i + 1].proposed_at)) || dur || (ds + 6)
-      de = Math.max(ds + 0.6, Math.min(+nextDs, dur || ds + 12))
-      explicitEnd = false
-    }
-    return {
-      ...m,
-      display_start: +ds.toFixed(3),
-      display_end: +de.toFixed(3),
-      effect: 'random', // 随机转场入场动画
-      _explicitEnd: explicitEnd,
-    }
-  })
-  // 链式衔接：只对「兜底出来的 end」裁剪，避免与下一条重叠；
-  // 人工/DP 显式设置的 end（如同一 rap 段内前后两句）保持原样
-  for (let i = 0; i < messages.length - 1; i++) {
-    if (messages[i]._explicitEnd) continue
-    const nextDs = messages[i + 1].display_start
-    if (messages[i].display_end > nextDs) {
-      messages[i].display_end = +Math.max(nextDs, messages[i].display_start + 0.6).toFixed(3)
-    }
-  }
-  messages.forEach((m) => { delete m._explicitEnd })
-  return {
-    title: opts.title || '聊天记录视频',
-    platform: opts.platform || 'wechat',
-    mode: opts.mode || 'single',
-    members: opts.members || (parse.messages?.length ? defaultMembers(['我', '对方']) : []),
-    audio: opts.audio || '',
-    audioDuration: dur,
-    duration: dur,
-    centered: opts.centered !== false, // 默认气泡水平居中 + 交替入场 + 随机转场
-    messages,
-  }
-}
-
 // ====================== 子命令实现 ======================
-// 把 LLM 决策（[{emotion,sticker,effect}]，sticker 可为 kind 或文件名）合并进消息数组，写回 sticker 文件名
-function applyDecisionsToMessages(messages, decisions) {
-  if (!Array.isArray(decisions) || decisions.length === 0) return messages
-  const kindToFile = {}
-  for (const s of (EFFECTS_CATALOG.sticker || [])) kindToFile[s.kind] = s.file
-  return messages.map((m, i) => {
-    const d = decisions[i]
-    if (!d) return m
-    let sticker = d.sticker || ''
-    if (sticker && kindToFile[sticker]) sticker = kindToFile[sticker] // kind→文件名
-    return { ...m, emotion: d.emotion || m.emotion || 'neutral', sticker, effect: d.effect || m.effect || '' }
-  })
-}
-
 async function cmdRun(args) {
   await ensureServer()
   const audio = args['--audio']
@@ -213,7 +131,7 @@ async function cmdRun(args) {
   if (!audio) throw new Error('run 需要 --audio <音频路径或URL>')
   if (!script) throw new Error('run 需要 --script <脚本文本>')
 
-  patchState({ current_step: 'SCRIPT', status: 'running', pipeline: 'parseScript→alignDP' + (skipRender ? '' : '→render') })
+  patchState({ current_step: 'SCRIPT', status: PROJECT_STATUS.RUNNING, pipeline: 'parseScript→alignDP' + (skipRender ? '' : '→render') })
 
   // Stage 1: parseScript
   log('parseScript ...')
@@ -265,12 +183,12 @@ async function cmdRun(args) {
 
   // Stage 4: render
   if (skipRender) {
-    patchState({ current_step: 'TIMELINE', status: 'aligned', align_result: align })
+    patchState({ current_step: 'TIMELINE', status: PROJECT_STATUS.SUCCEEDED, align_result: align })
     log('已跳过 render（--skip-render）。align 结果见 pipeline_state.json。')
     return
   }
   await renderStage({ align, parse, script, audio, out, platform, mode })
-  patchState({ current_step: 'RENDER', status: 'done', output: out })
+  patchState({ current_step: 'RENDER', status: PROJECT_STATUS.SUCCEEDED, output: out })
   log('完成，输出：', out)
 }
 
@@ -298,7 +216,7 @@ async function cmdApplyFixes(args) {
   const result = await callTool('aiApplyFix', { mapping, fixes: fixes.fixes || fixes, beatGrid })
   patchState({
     current_step: 'SEMANTIC',
-    status: 'ai_reviewed',
+    status: PROJECT_STATUS.WAITING_AGENT,
     needs_review: !!result.mapping_meta.needs_review,
     align_result: { ...state.align_result, mapping: result.mapping, mapping_meta: result.mapping_meta },
   })
@@ -319,24 +237,15 @@ async function cmdApplyFixes(args) {
       mode: state.mode || 'single',
       members: state.members || [],
     })
-    patchState({ current_step: 'RENDER', status: 'done', output: out })
+    patchState({ current_step: 'RENDER', status: PROJECT_STATUS.SUCCEEDED, output: out })
     log('完成，输出：', out)
   } else {
     log('未提供音频/输出，仅写回修正（render 可后续手动触发）。')
   }
 }
 
-function buildScriptText(messages) {
-  return (messages || []).map((m) => {
-    if (m.type === 'time') return `[${m.content}]`
-    if (m.type === 'system') return `[系统]${m.content}`
-    const sp = m.speaker || (m.role === 'me' ? '我' : '对方') || 'A'
-    return `${sp}说：${m.content}`
-  }).join('\n')
-}
-
 async function renderStage({ align, parse, script, audio, out, platform, mode, members }) {
-  patchState({ current_step: 'RENDER', status: 'rendering' })
+  patchState({ current_step: 'RENDER', status: PROJECT_STATUS.RUNNING })
   mkdirSync(dirname(out), { recursive: true })
   const project = buildProject({ parse, align, opts: { platform, mode, audio, script, members } })
   log('render ...')
@@ -367,7 +276,7 @@ async function cmdRunPage(args) {
   const scriptText = buildScriptText(messages)
 
   // 2) alignDP（节拍网格 + faster-whisper + DP 对齐）
-  patchState({ current_step: 'SCRIPT', status: 'running', script_messages: messages, members, audio_path: audio, platform, mode })
+  patchState({ current_step: 'SCRIPT', status: PROJECT_STATUS.RUNNING, script_messages: messages, members, audio_path: audio, platform, mode })
   log('alignDP ...')
   const align = await callTool('alignDP', { audioPath: audio, scriptText, model: 'small', hopLength: 512 })
   patchState({ current_step: 'VOICEOVER', alignment_mode: align.alignment_mode, asr_quality_score: align.asr_quality_score, mapping_meta: align.mapping_meta })
@@ -403,12 +312,12 @@ async function cmdRunPage(args) {
 
   // 4) render
   if (args['--skip-render']) {
-    patchState({ current_step: 'TIMELINE', status: 'aligned', align_result: align })
+    patchState({ current_step: 'TIMELINE', status: PROJECT_STATUS.SUCCEEDED, align_result: align })
     log('已跳过 render（--skip-render）。')
     return
   }
   await renderStage({ align, parse: { messages }, script: scriptText, audio, out, platform, mode, members })
-  patchState({ current_step: 'RENDER', status: 'done', output: out })
+  patchState({ current_step: 'RENDER', status: PROJECT_STATUS.SUCCEEDED, output: out })
   log('完成，输出：', out)
 }
 
@@ -471,33 +380,7 @@ function cmdGenlink(args) {
 // ====================== 语义贴纸标注 ======================
 // 读 script_messages → 对每句做情绪强度打分 → 仅当 ≥ 阈值才从 emoji_scenes.md 预设库选贴纸写回。
 // 阈值过滤作为确定性兜底；agent 的 LLM 语义层可覆盖打分/选择。
-const STICKER_THRESHOLD = 0.4
-
-function scoreEmotion(speaker, content) {
-  const c = content || ''
-  let s = 0.2
-  const hits = [
-    [/(扣.*绩效|滚|闭嘴|你算哪根葱|别惹我|你还要我怎样|我说了算|改红色|必须|赶紧)/, 0.7],
-    [/(你慢点放屁|不存在的|小牛马|职场如戏|你清醒一点|你就是个|你算哪根)/, 0.6],
-    [/(早这样多好|非要吵|活该|活该你|就该)/, 0.55],
-    [/(扣吧|随便|无所谓|也行|蓝色就蓝色|那.*就.*吧)/, 0.3],
-    [/(不改|设计稿|不该|不行|不要)/, 0.3],
-  ]
-  for (const [re, v] of hits) if (re.test(c)) s = Math.max(s, v)
-  return Math.min(1, s)
-}
-
-function pickSticker(score, content) {
-  if (score < STICKER_THRESHOLD) return null
-  const c = content || ''
-  if (/扣.*绩效|愤怒|滚|闭嘴/.test(c)) return 'angry_01.png'
-  if (/我说了算|改红色|必须|赶紧|你还要我怎样/.test(c)) return '你还要我怎样.jpg'
-  if (/你算哪根葱|别惹我|你清醒一点/.test(c)) return '你算哪根葱.jpg'
-  if (/你慢点放屁|不存在的|小牛马|职场如戏/.test(c)) return '你就是个小牛马.webp'
-  if (/早这样多好|非要吵/.test(c)) return '你就是个小牛马.webp'
-  if (score >= 0.8) return 'angry_01.png'
-  return '你就是个小牛马.webp'
-}
+// scoreEmotion/pickSticker/STICKER_THRESHOLD 已抽到 scripts/core/decisions.js。
 
 function cmdTagStickers(args) {
   const st = readState() || {}
