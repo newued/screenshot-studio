@@ -1,0 +1,8 @@
+{
+  "model": "small",
+  "device": "cpu",
+  "computeType": "int8",
+  "language": "zh",
+  "hfEndpoint": "https://hf-mirror.com",
+  "disableXet": true
+}

@@ -791,12 +791,13 @@ const BROWSER_ASR_MODEL = 'Xenova/whisper-small'
           <div className="pipeline-step-card" style={{ marginTop: 8 }}>
             <div className="pipeline-step-name">提交状态</div>
             <div className="pipeline-step-state">
-              {agentState?.output
-                ? '✅ 视频已生成，请在 AI 助手对话中获取文件路径'
-                : agentState?.page_confirmed
-                  ? '✅ 已提交，agent 已接收并正在处理（音画同步 / 时间轴 / 动效 / 渲染）…'
-                  : '⏳ 已提交，等待 AI 助手读取…（若长时间无响应，请确认 MCP 已连接）'}
+              {agentState?.page_confirmed || agentState?.status || agentState?.current_step
+                ? '✅ 已提交，AI 助手正在处理（音画同步 / 时间轴 / 动效 / 渲染）…'
+                : '⏳ 已提交，等待 AI 助手读取…（若长时间无响应，请确认 MCP 已连接）'}
             </div>
+            <p className="hint-text hint-text--muted" style={{ marginTop: 6 }}>
+              ⚠️ 本页面只负责上传配音与确认；视频生成进度与最终文件路径由 AI 助手在对话中返回，此处不会显示“视频已生成”。
+            </p>
           </div>
         )}
 
@@ -809,16 +810,15 @@ const BROWSER_ASR_MODEL = 'Xenova/whisper-small'
               <div className="pipeline-step-state">
                 状态：{agentState.status || (agentState.page_confirmed ? 'agent 已接收' : '等待')}
                 {agentState.needs_review && '（需 AI 语义干预）'}
-                {agentState.output && ` · 输出：${agentState.output}`}
               </div>
               {agentState.asr_quality_score != null && (
                 <div className="pipeline-step-desc">ASR 质量分：{agentState.asr_quality_score} · 对齐模式：{agentState.alignment_mode || '—'}</div>
               )}
             </div>
+            <p className="hint-text hint-text--muted" style={{ marginTop: 6 }}>
+              生成中的进度如上；最终视频路径会在 AI 助手对话里返回，请在那里查看，不要在本页面等待结果。
+            </p>
           </div>
-        )}
-        {submitted && agentState?.output && (
-          <p className="hint-text hint-text--muted">视频已生成，请在 AI 助手对话中获取文件路径。</p>
         )}
       </div>
 

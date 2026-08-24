@@ -47,6 +47,7 @@ import { callTool, health } from './core/client.js'
 import { runProductionPlan, cancelProductionPlan } from './core/planner.js'
 import { detectCapabilities } from './core/capabilities.js'
 import { runDoctor } from './core/doctor.js'
+import { ensureAsrModel, isAsrModelCached, loadAsrConfig } from '../mcp-server/tools/asrModel.js'
 
 const __dirname = dirname(fileURLToPath(import.meta.url))
 const ROOT = resolve(__dirname, '..')
@@ -147,18 +148,16 @@ async function cmdRun(args) {
   if (!audio) throw new Error('run 需要 --audio <音频路径或URL>')
   if (!script) throw new Error('run 需要 --script <脚本文本>')
 
-  // 语义贴纸/动效决策（可选）：把 decisions 写回每句消息的 sticker/effect，渲染才会有贴纸。
+  // 语义贴纸/动效决策（可选）：把 decisions 交给 Planner 合并进解析后的消息，渲染才会有贴纸。
   // 不传 --decisions 也能出片，但无语义贴纸（可用 tag-stickers 规则兜底或 apply-fixes 补）。
-  const baseMessages = buildScriptText(script).messages
-  let msgs = baseMessages
+  let decisions = []
   if (args['--decisions']) {
     const raw = readArgVal(args['--decisions'])
-    const decisions = typeof raw === 'string' ? JSON.parse(raw) : raw
-    msgs = applyDecisionsToMessages(baseMessages, decisions)
+    decisions = typeof raw === 'string' ? JSON.parse(raw) : raw
   }
 
-  // 委托给 Planner（scripts/core/planner.js）执行生产计划
-  const res = await runProductionPlan({ statePath: STATE_PATH, projectId: 'default', audioPath: audio, scriptText: script, messages: msgs, platform, mode, out, skipRender })
+  // 委托给 Planner（scripts/core/planner.js）执行生产计划；解析与决策合并都在 Planner 内完成
+  const res = await runProductionPlan({ statePath: STATE_PATH, projectId: 'default', audioPath: audio, scriptText: script, decisions, platform, mode, out, skipRender })
   if (res.needsReview) {
     console.log('\n=== AI_HANDOFF_JSON ===')
     console.log(JSON.stringify(res.handoff, null, 2))
@@ -254,8 +253,21 @@ async function cmdRunPage(args) {
   const members = state.members || []
   const scriptText = buildScriptText(messages)
 
+  // 语义决策：优先用 --decisions 文件；否则从页面已确认的 messages（含 sticker/effect）重建
+  let decisions = []
+  if (args['--decisions']) {
+    const raw = readArgVal(args['--decisions'])
+    decisions = typeof raw === 'string' ? JSON.parse(raw) : raw
+  } else if (messages.length) {
+    decisions = messages.map((m) => ({
+      emotion: m.emotion || 'neutral',
+      sticker: m.sticker || '',
+      effect: m.effect || '',
+    }))
+  }
+
   // 委托给 Planner 执行（页面模式同样走统一生产计划）
-  const res = await runProductionPlan({ statePath: STATE_PATH, projectId: state.project_id || 'default', audioPath: audio, scriptText, messages, members, platform, mode, out, skipRender: !!args['--skip-render'] })
+  const res = await runProductionPlan({ statePath: STATE_PATH, projectId: state.project_id || 'default', audioPath: audio, scriptText, messages, decisions, members, platform, mode, out, skipRender: !!args['--skip-render'] })
   if (res.needsReview) {
     console.log('\n=== AI_HANDOFF_JSON ===')
     console.log(JSON.stringify(res.handoff, null, 2))
@@ -396,6 +408,58 @@ function cmdTagStickers(args) {
   log(`共 ${n}/${tagged.length} 句带贴纸`)
 }
 
+// ====================== ASR 模型依赖管理 ======================
+// 用户确认「把 ASR 模型纳入受管依赖」：与 Python 包一样有配置(asr-config.json)、
+// 预下载(setup-asr / agent-up)、doctor 自检与离线兜底。
+async function cmdSetupAsr(args) {
+  const model = args._[0] || loadAsrConfig().model
+  log(`预下载 ASR 模型 "${model}"（受管依赖，需联网）...`)
+  const r = await ensureAsrModel(model)
+  if (r.ok) {
+    log(`✅ ASR 模型已就绪: ${r.model}（缓存于 ~/.cache/huggingface）`)
+    log('后续 alignDP 将使用真实逐句/逐字对齐（asr_enhanced），音画严格同步。')
+  } else {
+    err(`❌ ASR 模型下载失败 [${r.reason}]: ${r.message}`)
+    err('离线环境下 alignDP 将退化为「VAD 语音分段 → 长度加权节拍网格」（音画近似同步）。')
+    err('在可联网的机器上重跑 `agent-bridge setup-asr` 即可补齐。')
+    process.exitCode = 1
+  }
+}
+
+// 关闭前端（vite :5173）。用户确认页面信息后，前端不再需要，由 agent 接管后续交互。
+function killPort(port) {
+  try {
+    if (process.platform === 'win32') {
+      const out = execSync(`netstat -ano | findstr :${port}`, { stdio: 'pipe' }).toString()
+      const pids = new Set()
+      out.split('\n').forEach((line) => {
+        if (!line.includes(`:${port}`)) return
+        const m = line.trim().split(/\s+/)
+        const pid = m[m.length - 1]
+        if (pid && /^\d+$/.test(pid)) pids.add(pid)
+      })
+      for (const pid of pids) {
+        try { execSync(`taskkill /PID ${pid} /F /T`, { stdio: 'ignore' }) } catch { /* ignore */ }
+      }
+    } else {
+      execSync(`lsof -ti:${port} | xargs -r kill -9`, { stdio: 'ignore' })
+    }
+  } catch { /* 端口未占用或无需关闭 */ }
+}
+
+async function cmdDown(args) {
+  const closeAll = !!args['--all']
+  log('关闭前端服务 vite(5173)（确认后由 agent 接管，前端不再需要）...')
+  killPort(5173)
+  if (closeAll) {
+    log('同时关闭 mcp-server(9527)...')
+    killPort(9527)
+  }
+  await sleep(800)
+  if (await ping(5173)) err('⚠ 前端端口 5173 仍未关闭，请手动检查占用进程')
+  else log('✅ 前端已关闭')
+}
+
 // ====================== CLI 解析 ======================
 function parseArgs(argv) {
   const out = { _: [] }
@@ -456,19 +520,27 @@ async function main() {
     case 'tag-stickers':
       cmdTagStickers(args)
       break
+    case 'setup-asr':
+      await cmdSetupAsr(args)
+      break
+    case 'down':
+      await cmdDown(args)
+      break
     default:
       console.log(`用法: node scripts/agent-bridge.mjs <ensure|open|run|run-page|apply-fixes|tag-stickers|status> [选项]`)
       console.log(`  ensure`)
       console.log(`  open [page] [--script S] [--audio URL]       打开网页注入脚本/音频（自动拉起浏览器，带 ?agent=1）`)
       console.log(`  genlink [page] [--script S] [--audio U] [--open]  拼装深链 URL（自动 encodeURIComponent）；--open 直接打开浏览器`)
       console.log(`  run --audio A --script S [--decisions @决策.json] [--platform wechat] [--mode single|group] [--out out.mp4] [--skip-render]`)
-      console.log(`  run-page [--platform wechat] [--mode single|group] [--out out.mp4]`)
+      console.log(`  run-page [--platform wechat] [--mode single|group] [--out out.mp4] [--decisions @决策.json]`)
       console.log(`           （用户回来说「信息已确认」后再调：读网页最新脚本/头像/名称/配音，串对齐+渲染）`)
       console.log(`  apply-fixes [--state FILE] --fixes JSON  （音频/输出自动从 pipeline_state.json 取）`)
       console.log(`  tag-stickers [--state FILE]           语义贴纸标注（情绪度≥${STICKER_THRESHOLD} 才带贴纸，写回 script_messages.sticker）`)
       console.log(`  status [--state FILE]`)
-      console.log(`  doctor                        环境冒烟自检（STATE_PATH/能力就绪），用于排障`)
-      console.log(`  up                            统一启动本地后端(mcp) + 前端(vite) 并自检（推荐日常入口）`)
+      console.log(`  doctor                        环境冒烟自检（STATE_PATH/能力就绪/ASR模型），用于排障`)
+      console.log(`  setup-asr [model]             预下载 ASR 模型权重（受管依赖，需联网；离线则提示兜底）`)
+      console.log(`  up                            统一启动本地后端(mcp) + 前端(vite) 并自检（推荐日常入口，自动预载 ASR 模型）`)
+      console.log(`  down [--all]                  用户确认后关闭前端(vite 5173)，[--all] 同时关 mcp(9527)`)
       process.exitCode = 1
   }
 }

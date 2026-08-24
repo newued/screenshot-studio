@@ -28,6 +28,14 @@
 - **队列式人机协同工作流已实现**：`src/lib/pipelineState.js` 状态机（PENDING→AWAIT_CONFIRM→CONFIRMED→DONE，5 步 SCRIPT→VOICEOVER→TIMELINE→SEMANTIC→RENDER）+ `VideoPipelinePanel` 分步确认门（可中断 / 编辑 / 继续）。
 - 待补项：节拍网格优先 + 有序 DP 全局对齐、独立本地预览页、歌曲对话智能分析、音效库。
 
+## 4.1 ASR 模型（受管依赖）
+- faster-whisper 权重**已纳入受管依赖**（与 Python 包同级处理），不再写死在 `transcribe.js`：
+  - 单一配置真相源：`mcp-server/asr-config.json`（`model/device/computeType/language`，默认 `small`；`hfEndpoint` 默认 `https://hf-mirror.com`，`disableXet` 默认 `true`）；`transcribe.js` / `registry.js` / `doctor.js` 均从此读。HF 官方不可达时自动走镜像，并禁用 xet/CAS 重建以规避 401。
+  - 预下载与兜底：`mcp-server/tools/asrModel.js` 的 `ensureAsrModel()` 幂等下载（已缓存秒回），失败返回结构化原因、**不中断流程**。
+  - 命令行：`agent-bridge setup-asr [model]` 显式预载；`agent-up` 启动阶段自动 best-effort 预载；`doctor` 展示权重缓存状态。
+  - 离线兜底：模型不可达时 `alignDP` 退化为「VAD 语音分段 → 长度加权节拍网格」（音画近似同步），并明确提示用户需联网机器补齐。
+- 用户确认页面信息后，前端不再需要：`agent-bridge down` 关闭 vite(5173)，`down --all` 同时关 mcp(9527)；后续交互由 agent 在对话里完成。
+
 ## 5. Agent 编排协议（agent 优先的对话式工作流）
 
 > 本节约束「agent（本会话大模型）在视频生成时的对话式行为」。任何会话的 agent 都必须遵守，不可跳过询问门。
@@ -101,3 +109,30 @@
 - **TIMELINE 是派生步**：时间轴由 `VOICEOVER/alignDP` 的 mapping 产出，`planner` 在 alignDP 成功后标记 `timeline_status: SUCCEEDED`，不单独执行工具。
 - **MCP 守卫（硬性防绕过）**：`mcp-server/registry.js` 的 `guardTool` 在每次 `dispatchTool` 前按 `pipeline_state.json` 校验前置步骤；越序调用（如未对齐就 `render`、未对齐就 `applyCreative`/`aiApplyFix`、未 `alignDP` 就 `aiReview`）会抛 `[GUARD:<CODE>]` 错误并拒绝执行。agent 收到错误后自我纠正。
 - **原则**：规则从「请 Agent 遵守」逐步转为「Runtime 不允许违反」。SKILL.md 只告诉 Agent 怎么做/何时问用户；流程约束由 State + Guard 在运行时强制。
+
+## 7. 踩坑经验与教训（本轮迭代沉淀）
+
+> 以下为已修复的反复踩坑点，凡改动相关模块须先读本节，避免回归。
+
+### 7.1 ASR 模型必须当作受管依赖，且要过镜像 + 禁 xet
+- 现象：faster-whisper 权重不在 pip 内，需从 HF 下载。直连 HF 常 `ConnectTimeout`；改走镜像 `https://hf-mirror.com` 后仍可能撞 xet/CAS 重建 `401 Unauthorized`。
+- 修复：配置集中在 `mcp-server/asr-config.json`（`model/device/computeType/language/hfEndpoint/disableXet`）；`asrModel.js:applyAsrEnv()` 在「下载 + 运行」两处统一注入 `HF_ENDPOINT` 与 `HF_HUB_DISABLE_XET`；`setup-asr` / `agent-up` 预载、`doctor` 自检。`transcribe.js` / `registry.js` 的模型名一律读配置，不再写死 `'small'`。
+- 离线兜底：`alignDP` 先试 ASR → 失败走 `vad.js` 的 VAD 分段 → 再退化「长度加权节拍网格」；`agent-up`/`doctor` 明确提示「需联网机器补模型」。
+
+### 7.2 语义决策（贴纸/动效）必须贯穿整条管线，不能被重新解析丢弃
+- 现象：贴纸/动效在视频里「整批消失」或全是同一种。
+- 根因：`planner.runProductionPlan` 曾对 messages 重新 `parseScript`，把传入的 `sticker/effect` 整体丢弃；`project.buildProject` 又强制 `effect:'random'`。
+- 修复：决策经 `decisions.applyDecisionsToMessages` 合并进解析后消息；`buildProject` 仅在无决策时回退随机；`run` / `run-page` 均经 `--decisions` 传入（`run` 还新增 emotion→入场动效枚举的 `EFFECT_MAP`）。
+
+### 7.3 前端不得用共享 state 伪造「完成」
+- 现象：用户点「确认页面信息」后，前端立即显示「视频已生成」，实际是读到上一次 `pipeline_state.json.output` 的脏结果。
+- 修复：`VideoPipelinePanel` 去除假成功提示，结果一律由 agent 在对话返回；前端仅负责上传 + 确认闸门。确认后由 agent 调 `agent-bridge down` 关闭 vite(5173)，`down --all` 同关 mcp(9527)。
+
+### 7.4 音画同步的边界是环境限制，不是 bug
+- 真·逐句同步依赖 ASR；本机对 HF 离线即退化长度加权。音乐类配音能量持续，能量 VAD 只能切出单段，无法按句分段。需联网装模型，或用 `apply-fixes` 手动时间轴精修（手感闸门 `needs_review` 是设计内的，agent 须读 AI_HANDOFF 产出 fixes 再 `apply-fixes`）。
+
+### 7.5 贴纸尺寸要与消息长度解耦，且允许放大填满
+- 现象①：部分贴纸特别小、且长短消息忽大忽小。根因：贴纸高度由「白卡下方空隙 `gapH`」决定，长消息白卡高→空隙小→贴纸被压小。
+- 修复①（`canvasChat.js`）：有贴纸时把白卡压到上方、预留固定「贴纸带」（屏高 42%，最小高度 500px），贴纸尺寸以带为准，与消息长度无关。
+- 现象②：某张 6KB 低分辨率贴纸（`怀疑人生.jpg`）显得极小。根因：`drawSticker` 曾 `scale = min(..., 1)` 禁止放大，小源图按原始像素绘制。
+- 修复②：去掉 `,1` 上限，contain 放大填满贴纸带。注意：源图分辨率低会被放大发虚，应替换为高清同名图（`dist/emojis/imgs/` 或 `public/emojis/imgs/`）。

@@ -3,6 +3,7 @@
 // 避免像本轮那样跑到 run-page 才因 STATE_PATH / ffmpeg / python 缺失而炸。
 import { STATE_PATH, readState } from './state.js'
 import { detectCapabilities } from './capabilities.js'
+import { loadAsrConfig, isAsrModelCached } from '../../mcp-server/tools/asrModel.js'
 import { existsSync } from 'node:fs'
 import { dirname, join } from 'node:path'
 
@@ -46,6 +47,18 @@ export function runDoctor() {
   for (const [n, v] of capItems) {
     checks.push({ name: n, detail: v ? '就绪' : '缺失', ok: v })
     if (!v) warnings.push(`${n} 未就绪：视频生成/ASR 会失败（图片导出仍可）`)
+  }
+
+  // ASR 模型权重（受管依赖）缓存状态
+  const asrCfg = loadAsrConfig()
+  const asrCached = isAsrModelCached(asrCfg.model)
+  checks.push({
+    name: `ASR 模型(${asrCfg.model})`,
+    detail: asrCached ? '已缓存（可逐字对齐）' : '未预载（离线退化兜底）',
+    ok: true,
+  })
+  if (!asrCached && caps.asr) {
+    warnings.push(`ASR 模型 "${asrCfg.model}" 未预载：离线环境 alignDP 将退化为 VAD/长度加权兜底（近似同步）；可联网机器跑 \`setup-asr\` 预下载。`)
   }
 
   return { ok: warnings.length === 0, caps, checks, warnings }

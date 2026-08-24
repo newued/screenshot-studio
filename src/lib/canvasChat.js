@@ -516,7 +516,8 @@ function drawSticker(ctx, file, x, y, maxW, maxH, anim, side, progress) {
   const url = resolveStickerUrl(file)
   const img = cachedImg(url)
   if (!img) return
-  const scale = Math.min(maxW / imgW(img), maxH / imgH(img), 1)
+  // 允许放大以填满贴纸带（不再受源图尺寸限制）；contain 适配，超出部分留白不裁剪
+  const scale = Math.min(maxW / imgW(img), maxH / imgH(img))
   const iw = imgW(img) * scale
   const ih = imgH(img) * scale
   const sp = stickerProgress(anim, progress, side)
@@ -749,7 +750,11 @@ export function createChatFrameRenderer({
       // 白卡为长方形（无圆角），高度明显高于消息块：上下各留 80px 空余，并能罩住 100px 头像
       const V_PAD = 80
       const cardH = blockH + V_PAD * 2
-      const cardY = Math.round(TITLE_H + (height - TITLE_H - cardH) / 2)
+      // 有贴纸时把白卡压到上方，下方预留固定「贴纸带」，使贴纸尺寸与消息长短解耦（不再忽大忽小）
+      const hasSticker = !!it.msg.sticker
+      const STK_BAND = Math.round(height * 0.42)
+      const topRegionH = height - (hasSticker ? STK_BAND : 0)
+      const cardY = Math.round(TITLE_H + Math.max(24, (topRegionH - TITLE_H - cardH) / 2))
       ctx.save()
       ctx.globalAlpha = finalAlpha
       // 整组（白卡 + 气泡 + 头像）一起做入场/出场动效：位移 + 缩放 + 旋转，绕白卡中心
@@ -766,27 +771,25 @@ export function createChatFrameRenderer({
       const drawY = Math.round(cardY + (cardH - blockH) / 2) + (it.hasName ? NAME_H : 0)
       drawMessage(ctx, it.msg, { ...it, y: drawY }, members, platform, showName, ICON_REDPACKET, ICON_VOICE)
       ctx.restore()
-      // 贴纸：独立绘制在“白卡下方”的留白区，水平+垂直居中；只做固定渐隐渐出（不随白卡缩放旋转）
-      if (it.msg.sticker) {
-        const gapTop = cardY + cardH
-        const gapBottom = height
-        const gapH = gapBottom - gapTop
-        const STK_MARGIN = 50 // 与屏幕底边/白卡底边的固定留白
-        const stickerH = Math.min(Math.max(cardH * 1.5, 320), gapH - STK_MARGIN * 2)
-        const stickerW = Math.min(Math.max(stickerH * 0.8, 380), width * 0.6)
-        if (stickerH > 60) {
-          const sx = Math.round((width - stickerW) / 2)
-          const sy = Math.round(gapTop + (gapH - stickerH) / 2)
-          // 固定渐隐渐出：入场 0.25s 淡入、离场 0.25s 淡出（不受白卡缩放影响）
-          const fadeIn = clamp01(appearP / 0.6)
-          const fadeOut = t > info.de ? clamp01((info.de + 0.25 - t) / 0.25) : 1
-          const stkAlpha = clamp01(fadeIn * fadeOut)
-          if (stkAlpha > 0.01) {
-            ctx.save()
-            ctx.globalAlpha = finalAlpha * stkAlpha
-            drawSticker(ctx, it.msg.sticker, sx, sy, stickerW, stickerH, 'fade', 'right', appearP)
-            ctx.restore()
-          }
+      // 贴纸：绘制在下方固定「贴纸带」内，水平居中；尺寸以贴纸带为准，不受消息长短影响
+      if (hasSticker) {
+        const STK_MARGIN = 36
+        const bandTop = height - STK_BAND
+        // 尺寸下限 500px，上限占满贴纸带；与白卡高度解耦，避免长消息把贴纸挤小
+        const stickerH = Math.min(Math.max(cardH * 1.1, 500), STK_BAND - STK_MARGIN * 2)
+        const stickerW = Math.min(stickerH * 0.8, width * 0.6)
+        const sx = Math.round((width - stickerW) / 2)
+        const sy = Math.round(bandTop + (STK_BAND - stickerH) / 2)
+        // 固定渐隐渐出：入场 0.25s 淡入、离场 0.25s 淡出（不受白卡缩放影响）
+        const fadeIn = clamp01(appearP / 0.6)
+        const fadeOut = t > info.de ? clamp01((info.de + 0.25 - t) / 0.25) : 1
+        const stkAlpha = clamp01(fadeIn * fadeOut)
+        if (stkAlpha > 0.01) {
+          ctx.save()
+          ctx.globalAlpha = finalAlpha * stkAlpha
+          // 贴纸动画随情绪变化（pop/rotate/shake/fade/slide），让画面更丰富
+          drawSticker(ctx, it.msg.sticker, sx, sy, stickerW, stickerH, emotionToAnim(it.msg.emotion), 'right', appearP)
+          ctx.restore()
         }
       }
     }

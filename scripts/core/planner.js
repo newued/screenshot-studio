@@ -11,6 +11,7 @@ import { callTool } from './client.js'
 import { patchState, persistArtifact } from './state.js'
 import { PROJECT_STATUS, buildProductionPlan } from '../../src/lib/pipelineContract.js'
 import { buildProject, buildScriptText } from './project.js'
+import { applyDecisionsToMessages } from './decisions.js'
 
 // 计划定义从单一工作流契约派生（pipelineContract.WORKFLOW_STEPS），
 // 保证与 STEP_ORDER 永远一致，杜绝 TIMELINE 被漏掉这类漂移。
@@ -26,6 +27,7 @@ export async function runProductionPlan({
   audioPath,
   scriptText,
   messages = [],
+  decisions = [],
   members = [],
   platform = 'wechat',
   mode = 'single',
@@ -41,7 +43,9 @@ export async function runProductionPlan({
     activeStep = 'SCRIPT'
     patchState(statePath, { current_step: 'SCRIPT', status: PROJECT_STATUS.RUNNING, project_id: projectId, platform, mode })
     const parse = await callTool('parseScript', { scriptText, platform, mode })
-    const msgs = parse.messages || []
+    let msgs = parse.messages || []
+    // 关键修复：把语义决策（sticker/effect）合并进解析结果，否则贴纸与动效会在重解析时被丢弃
+    if (decisions && decisions.length) msgs = applyDecisionsToMessages(msgs, decisions)
     parse.messages = msgs
     patchState(statePath, { current_step: 'SCRIPT', status: PROJECT_STATUS.SUCCEEDED, script_messages: msgs, script_text: scriptText, project_id: projectId, platform, mode })
     await persistArtifact(statePath, projectId, 'SCRIPT', { messages: msgs, script_text: scriptText, platform, mode })

@@ -5,7 +5,20 @@
 
 import { EFFECTS_CATALOG } from '../../src/lib/effectsCatalog.js'
 
-// 把 LLM 决策（sticker 可为 kind 或文件名）合并进消息数组，写回 sticker 文件名
+// 动效词表 kind → 渲染器入场枚举（canvasChat ENTER_SET 支持的值）
+const EFFECT_MAP = {
+  pop: 'pop_in',
+  zoom: 'zoom_in',
+  shake: 'bounce_in',
+  flash: 'flip_in',
+  float: 'slide_in_top',
+  glitch: 'flip_in',
+  fade_in: 'fade_in',
+  slide_in_left: 'slide_in_left',
+  slide_in_right: 'slide_in_right',
+}
+
+// 把 LLM 决策（sticker 可为 kind 或文件名；effect 可为 motion kind 或渲染器枚举）合并进消息数组
 export function applyDecisionsToMessages(messages, decisions) {
   if (!Array.isArray(decisions) || decisions.length === 0) return messages
   const kindToFile = {}
@@ -14,8 +27,10 @@ export function applyDecisionsToMessages(messages, decisions) {
     const d = decisions[i]
     if (!d) return m
     let sticker = d.sticker || ''
-    if (sticker && kindToFile[sticker]) sticker = kindToFile[sticker] // kind→文件名
-    return { ...m, emotion: d.emotion || m.emotion || 'neutral', sticker, effect: d.effect || m.effect || '' }
+    if (sticker && kindToFile[sticker]) sticker = kindToFile[sticker] // kind→文件名（如 laugh→happy_01.png）
+    let effect = d.effect || m.effect || 'random'
+    if (EFFECT_MAP[effect]) effect = EFFECT_MAP[effect] // motion kind→渲染器枚举；已是渲染器枚举则保持
+    return { ...m, emotion: d.emotion || m.emotion || 'neutral', sticker, effect }
   })
 }
 

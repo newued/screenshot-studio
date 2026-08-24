@@ -9,6 +9,7 @@ import { spawn, execSync } from 'node:child_process'
 import { existsSync } from 'node:fs'
 import { resolve, dirname } from 'node:path'
 import { fileURLToPath } from 'node:url'
+import { ensureAsrModel, loadAsrConfig } from '../mcp-server/tools/asrModel.js'
 
 const __dirname = dirname(fileURLToPath(import.meta.url))
 const ROOT = resolve(__dirname, '..')
@@ -271,12 +272,25 @@ async function main() {
     console.log(`│ ASR     : ${caps.asr ? 'READY' : 'NOT_READY'} │`)
     console.log('└────────────────────────────────────────┘')
     log('服务在后台运行，可继续调用 agent-bridge 命令')
-  } else {
+   } else {
     const mcpUp = await mcpHealth()
     const viteUp = await viteHealth()
     const down = [!mcpUp && 'mcp-server(9527)', !viteUp && 'vite(5173)'].filter(Boolean).join('、')
     fail(`后端未完全就绪: ${down} 未启动，请检查端口占用与依赖`)
     process.exitCode = 1
+  }
+
+  // ---------- 预下载 ASR 模型（受管依赖）----------
+  // 与 ffmpeg/python 同级的依赖补齐：尽量在服务启动阶段把模型拉到本地缓存，
+  // 避免首次出片才联网下载；离线则跳过并提示后续对齐会退化为兜底。
+  step('预下载 ASR 模型（受管依赖）...')
+  const asrCfg = loadAsrConfig()
+  try {
+    const asrR = await ensureAsrModel(asrCfg.model)
+    if (asrR.ok) ok(`ASR 模型 ${asrR.model} 已预载（~/.cache/huggingface）`)
+    else warn(`ASR 模型未预载[${asrR.reason}]: ${asrR.message}；离线时 alignDP 退化为 VAD/长度加权兜底（近似同步）`)
+  } catch (e) {
+    warn(`ASR 模型预下载异常: ${e.message}（不影响启动，离线对齐将走兜底）`)
   }
 }
 

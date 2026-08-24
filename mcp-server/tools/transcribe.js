@@ -8,6 +8,7 @@ import { join } from 'node:path'
 import { tmpdir } from 'node:os'
 import { promisify } from 'node:util'
 import { requirePython } from './pyEnv.js'
+import { loadAsrConfig } from './asrModel.js'
 
 const execFileAsync = promisify(execFile)
 
@@ -19,11 +20,12 @@ const execFileAsync = promisify(execFile)
  * @returns {{ timeline: Array<{display_start,display_end}>, text: string[], raw: object[] }}
  */
 export async function transcribe(audioPath, scriptText, opts = {}) {
+  const cfg = loadAsrConfig()
   const {
-    model = 'small',
-    device = 'cpu',
-    computeType = 'int8',
-    language = 'zh',
+    model = cfg.model,
+    device = cfg.device,
+    computeType = cfg.computeType,
+    language = cfg.language,
     onProgress,
   } = opts
 

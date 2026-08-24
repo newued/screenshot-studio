@@ -14,10 +14,14 @@ import { transcribe, alignTimeline } from './tools/transcribe.js'
 import { extractBeatGrid, gridToUnits, snapToBeat } from './tools/beatGrid.js'
 import { renderFrame, renderAllFrames } from './tools/render.js'
 import { encodeMP4, cleanupFrames } from './tools/export.js'
+import { loadAsrConfig, applyAsrEnv } from './tools/asrModel.js'
 
 const __filename = fileURLToPath(import.meta.url)
 const __dirname = dirname(__filename)
 const ROOT = resolve(__dirname, '..')
+
+// ASR 依赖环境（镜像源 / 禁用 xet），确保 transcribe 运行前即生效（python 子进程继承）。
+applyAsrEnv()
 
 // 真相源：pipeline_state.json（前端轮询 + agent 读取）
 const STATE_PATH = join(ROOT, 'pipeline_state.json')
@@ -116,7 +120,7 @@ async function submitPage({ audioBase64, audioName, messages, members, title }) 
 
 // ==================== 工具注册表 ====================
 const TOOLS = {
-  transcribe: async ({ audioPath, scriptText, model = 'small' }) => {
+  transcribe: async ({ audioPath, scriptText, model = loadAsrConfig().model }) => {
     const raw = await transcribe(audioPath, scriptText, { model })
     const lines = scriptText.split('\n').map(l => l.replace(/^[AB]说[：:]\s*/, '').trim()).filter(Boolean)
     const timeline = alignTimeline(raw, lines)
@@ -148,7 +152,7 @@ const TOOLS = {
     return await extractBeatGrid(audioPath, { hopLength })
   },
 
-  alignDP: async ({ audioPath, audioBase64, scriptText, model = 'small', hopLength = 512 }) => {
+  alignDP: async ({ audioPath, audioBase64, scriptText, model = loadAsrConfig().model, hopLength = 512 }) => {
     let tmpAudioPath = null
     let resolvedAudioPath = audioPath
     if (!resolvedAudioPath && audioBase64) {
@@ -186,20 +190,37 @@ const TOOLS = {
         asrQualityScore = round(coverage * 0.5 + wordCoverage * 0.5, 2)
         if (asrQualityScore >= 0.5) alignmentMode = 'asr_enhanced'
       } catch (err) {
-        console.error('[alignDP] ASR 不可用，退化为「脚本文本 + 节拍网格均匀切片」的语义均分兜底:', err.message)
-        // 用脚本各行文本 + 在节拍网格上均匀取段，构造 rap units；
-        // DP 将按文本相似度做 1:1 对齐（等价于语义均分），避免全部 unmatched 强制人工干预。
+        console.error('[alignDP] ASR 不可用，退化为 VAD 语音分段兜底（音画同步）:', err.message)
         const nLines = lines.length
         const denom = Math.max(1, nLines - 1)
-        rapUnits = lines.map((text, i) => {
-          const k0 = Math.round((i * (beat_grid.length - 1)) / denom)
-          const k1 = Math.round(((i + 1) * (beat_grid.length - 1)) / denom)
-          const start = beat_grid[k0]
-          const end = i < nLines - 1 ? beat_grid[k1] : duration
-          return { text, start, end }
-        })
+        // 优先用能量 VAD 把音频切成真实说话段，让气泡锚定到实际说话时刻
+        try {
+          const { detectSpeechSegments, buildRapUnitsFromSegments } = await import(pathToFileURL(join(ROOT, 'mcp-server', 'tools', 'vad.js')).href)
+          const segs = await detectSpeechSegments(resolvedAudioPath)
+          if (segs && segs.length) {
+            rapUnits = buildRapUnitsFromSegments(lines, segs, duration)
+            alignmentMode = 'vad'
+            console.error(`[alignDP] VAD 命中 ${segs.length} 个语音段，用于对齐 ${nLines} 行`)
+          }
+        } catch (e2) {
+          console.error('[alignDP] VAD 也失败，最终退化为「脚本文本 + 节拍网格均匀切片」:', e2.message)
+        }
+        // 仍为空（VAD 不可用/无语音 / 音频为带伴奏歌曲）→ 兜底切片
+        if (!rapUnits.length) {
+          // 按文本长度加权分配时长：长句（如歌曲长句）占更多屏幕时间，提升音画观感同步
+          const weights = lines.map((t) => Math.max(1, String(t).length))
+          const totalW = weights.reduce((a, b) => a + b, 0) || nLines
+          let cursor = 0
+          rapUnits = lines.map((text, i) => {
+            const dur = (duration > 0 ? duration : (beat_grid[beat_grid.length - 1] || nLines)) * (weights[i] / totalW)
+            const start = +cursor.toFixed(3)
+            const end = i < nLines - 1 ? +(cursor + dur).toFixed(3) : (duration || +(cursor + dur).toFixed(3))
+            cursor = end
+            return { text, start, end }
+          })
+        }
         asrQualityScore = 0
-        alignmentMode = 'beat_grid'
+        if (alignmentMode === 'beat_grid') alignmentMode = 'beat_grid'
       }
       const { alignDP: runAlignDP } = await import(pathToFileURL(join(ROOT, 'src', 'lib', 'dpAlign.js')).href)
       const scriptMsgs = lines.map((text, i) => ({ text, id: i }))
@@ -274,13 +295,13 @@ const TOOL_DESCRIPTIONS = {
 
 // 工具输入 Schema（供 AI Agent 知道参数）
 const TOOL_SCHEMAS = {
-  transcribe: { type: 'object', properties: { audioPath: { type: 'string' }, scriptText: { type: 'string' }, model: { type: 'string', default: 'small' } }, required: ['audioPath', 'scriptText'] },
+  transcribe: { type: 'object', properties: { audioPath: { type: 'string' }, scriptText: { type: 'string' }, model: { type: 'string', default: loadAsrConfig().model } }, required: ['audioPath', 'scriptText'] },
   render: { type: 'object', properties: { project: { type: 'object' }, audioPath: { type: 'string' }, outputPath: { type: 'string' } }, required: ['project', 'outputPath'] },
   parseScript: { type: 'object', properties: { scriptText: { type: 'string' }, platform: { type: 'string' }, mode: { type: 'string' } }, required: ['scriptText'] },
   decide: { type: 'object', properties: { messages: { type: 'array' } }, required: ['messages'] },
   readScript: { type: 'object', properties: { scriptPath: { type: 'string' } }, required: ['scriptPath'] },
   beatGrid: { type: 'object', properties: { audioPath: { type: 'string' }, hopLength: { type: 'number', default: 512 } }, required: ['audioPath'] },
-  alignDP: { type: 'object', properties: { audioPath: { type: 'string' }, audioBase64: { type: 'string' }, scriptText: { type: 'string' }, model: { type: 'string', default: 'small' }, hopLength: { type: 'number', default: 512 } }, required: ['scriptText'] },
+  alignDP: { type: 'object', properties: { audioPath: { type: 'string' }, audioBase64: { type: 'string' }, scriptText: { type: 'string' }, model: { type: 'string', default: loadAsrConfig().model }, hopLength: { type: 'number', default: 512 } }, required: ['scriptText'] },
   aiReview: { type: 'object', properties: { scriptText: { type: 'string' }, beatGrid: { type: 'array', items: { type: 'number' } }, rawSegments: { type: 'array' }, mapping: { type: 'array' } }, required: ['scriptText', 'beatGrid', 'mapping'] },
   aiApplyFix: { type: 'object', properties: { mapping: { type: 'array' }, fixes: { type: 'array' }, beatGrid: { type: 'array', items: { type: 'number' } } }, required: ['mapping', 'fixes'] },
   submitPage: { type: 'object', properties: { audioBase64: { type: 'string' }, audioName: { type: 'string' }, messages: { type: 'array' }, members: { type: 'array' } }, required: ['audioBase64'] },

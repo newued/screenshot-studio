@@ -35,7 +35,8 @@ export function buildProject({ parse, align, opts }) {
       ...m,
       display_start: +ds.toFixed(3),
       display_end: +de.toFixed(3),
-      effect: 'random',
+      // 保留决策指定的动效（已在 decisions.js 映射为渲染器枚举）；无则随机挑选以丰富画面
+      effect: m.effect && m.effect !== 'random' ? m.effect : 'random',
       _explicitEnd: explicitEnd,
     }
   })
