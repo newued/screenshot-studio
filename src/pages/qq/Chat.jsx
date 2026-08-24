@@ -89,6 +89,7 @@ export default function QqChat() {
             platform="qq"
             mode="group"
             projectTitle={groupName || 'QQ群聊'}
+            groupName={groupName}
             script={script}
             onScriptChange={setScript}
             autoRun={DEEP.autoExport === 'video' || DEEP.autoExport === 'mp4' ? DEEP.autoExport : ''}

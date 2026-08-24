@@ -42,7 +42,8 @@
 
 ### 5.1 总流程
 ```
-① ensure/up     agent 用 `node scripts/agent-bridge.mjs up`（推荐）一键起 mcp-server(:9527) + vite(:5173)；或分步 `ensure` 仅起 mcp
+① ensure/up     agent 用 `node scripts/agent-bridge.mjs up`（推荐）一键起 mcp-server(:9527) + vite(:5173)；或分步 `ensure` 仅起 mcp。
+                  `up` 每次都会先杀掉可能残留的旧进程再拉起最新代码（避免旧 mcp 缓存旧 canvasChat 等模块），故跨会话重开直接 `up` 即可，无需手动 `down --all`。
 ② 生成脚本      按主题写对话脚本（或用户给素材）
 ③ open 注入      node scripts/agent-bridge.mjs open wechat/single --script @脚本.txt
                  （群聊 wechat/group / QQ qq；浏览器开 ?agent=1&script=... 自动注入）
@@ -93,14 +94,16 @@
 
 ### 6.3 agent 端分层（`scripts/core/`）
 - `client.js`：MCP HTTP 客户端（`callTool`/`health`）。
-- `state.js`：真相源读写 + Project Entity 路径（`persistArtifact` → `projects/<id>/artifacts/<step>.json`）。
+- `state.js`：真相源读写 + Project Entity 路径（`persistArtifact` → `<PROJECTS_DIR 或 ~/.screenshot-studio/projects>/<id>/artifacts/<STEP>/vN.json`）。
 - `project.js`：项目组装（`buildProject`/`buildScriptText`）。
 - `decisions.js`：LLM 创意决策合并 + 贴纸确定性兜底。
 - `planner.js`：生产计划 `PRODUCTION_PLAN` + 执行器 `runProductionPlan`（每步 RUNNING，失败标 FAILED，可 `cancelProductionPlan` 标 CANCELLED）。
 - `agent-bridge.mjs`：仅做生命周期 + CLI 分发（`up`(推荐)/`ensure`/`open`/`run`/`run-page`/`apply-fixes`/`tag-stickers`/`status`/`doctor`/`cancel`），编排一律委托 `planner.js`。`up` 为一键拉起 mcp+vite 的推荐入口。
 
 ### 6.4 Project Entity 约定
-- 项目目录：`<root>/projects/<project_id>/artifacts/`；每步产物为不可变文件：`script.json`/`voiceover.json`/`effects.json`/`final.mp4`，路径登记回 `pipeline_state.json.artifacts[step]`。
+- 项目目录：默认 `<PROJECTS_DIR 或 ~/.screenshot-studio/projects>/<project_id>/`（落在**用户数据目录、脱离技能源码树**，可用 `PROJECTS_DIR` 环境变量覆盖）；旧版曾写在 `<root>/projects/` 下，现已迁移并加 `.gitignore`。
+- 每步产物为**版本化不可变文件**：`artifacts/<STEP>/v1.json, v2.json, ...`（仅 SCRIPT / VOICEOVER / RENDER 三步落盘；TIMELINE / SEMANTIC 目前内联于 `pipeline_state.json`，未单独成文件）。最新一份绝对路径登记回 `pipeline_state.json.artifacts[step]`，全部版本记录于 `artifacts_versions[step]`，支持 `revertArtifact` 回滚。
+- 实际生成的 **MP4 不在 `projects/` 内**，落在 `run` / `run-page` 的 `--out` 指定路径（或 `~/Downloads/screenshot-studio/`）。
 - 创意决策写回（`applyCreative`）支持：`index/id` + `sticker`(须在表情库) + `effect`(须在枚举) + `display_start/end` + 可选 `emotion/semantic/reason/confidence`；校验失败直接抛错，无静默兜底。
 - **多项目并发 / 整目录迁移**尚未做：浏览器轮询路径仍按单个 `pipeline_state.json`，后续做需把前端 `project_id` 参数化（独立一轮，勿在传输层偷塞）。
 

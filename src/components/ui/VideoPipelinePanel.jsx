@@ -10,6 +10,7 @@ import { checkMcpStatus, mcpTranscribe, mcpAlignDP, mcpAlignDPFile, mcpSubmitPag
 import { alignDP, mappingToTimeline } from '../../lib/dpAlign'
 import { renderChatVideoMP4 } from '../../lib/mp4Renderer'
 import { createChatFrameRenderer } from '../../lib/canvasChat'
+import { deriveChatTitle } from '../../lib/chatTitle'
 import McpStatusBar from '../video/McpStatusBar'
 import { VOICE_STYLES, buildVoicePrompt } from '../../lib/voicePrompt'
 import { buildTimelinePrompt } from '../../lib/timelinePrompt'
@@ -35,6 +36,7 @@ export default function VideoPipelinePanel({
   platform = 'wechat',
   mode = 'single',
   projectTitle = '微信对话',
+  groupName = '',
   script = '',
   onScriptChange = () => {},
   autoRun = '',
@@ -396,13 +398,14 @@ const BROWSER_ASR_MODEL = 'Xenova/whisper-small'
         r.onerror = () => reject(r.error)
         r.readAsDataURL(localAudio)
       })
-      // 以「上方编排区」为准：title/members/messages 全部取自 props（同一数据源）
+      // 以「上方编排区」为准：members/groupName 全部取自 props；标题按规则派生后提交
       const res = await mcpSubmitPage({
         audioBase64: dataUrl,
         audioName: localAudio.name,
-        title: projectTitle,
+        title: headerTitle,
         messages,
         members,
+        groupName,
       })
       setSubmitted(true)
       toast.success('信息已确认，请回到 AI 助手对话继续')
@@ -491,24 +494,28 @@ const BROWSER_ASR_MODEL = 'Xenova/whisper-small'
   }, [audioFile, audioName])
 
   // ==================== 渲染引擎 ====================
+  // 顶栏标题强制按规则派生（与后端渲染、网页预览一致）：单聊=对方昵称，群聊=群名称。
+  // 任何网页上的昵称/头像/群名编辑都会反映到 members/groupName，从而同步进视频。
+  const headerTitle = useMemo(() => deriveChatTitle(mode, members, groupName), [mode, members, groupName])
+
   const chatRendererRef = useRef(null)
   const getChatRenderer = useCallback(() => {
     if (!chatRendererRef.current) {
       chatRendererRef.current = createChatFrameRenderer({
-        title: title || projectTitle,
+        title: headerTitle,
         project: { platform, mode, members },
       })
     }
     return chatRendererRef.current
-  }, [title, projectTitle, platform, mode, members])
+  }, [headerTitle, platform, mode, members])
 
   const renderFrame = useCallback((t) => {
     const timing = resolveTiming(mergedMessages, timeline)
     return getChatRenderer().render(t, {
       messages: mergedMessages, members, platform, mode,
-      title: title || projectTitle, timing,
+      title: headerTitle, timing,
     })
-  }, [mergedMessages, members, platform, mode, title, projectTitle, timeline, getChatRenderer])
+  }, [mergedMessages, members, platform, mode, headerTitle, timing, getChatRenderer])
 
   // ==================== 导出 ====================
   const exportMp4 = useCallback(async () => {

@@ -31,6 +31,7 @@ export async function runProductionPlan({
   members = [],
   platform = 'wechat',
   mode = 'single',
+  groupName = '',
   out,
   skipRender = false,
 }) {
@@ -121,7 +122,7 @@ export async function runProductionPlan({
     // 5) RENDER：合成成片
     activeStep = 'RENDER'
     patchState(statePath, { current_step: 'RENDER', status: PROJECT_STATUS.RUNNING })
-    const project = buildProject({ parse: { messages: msgs }, align, opts: { platform, mode, audio: audioPath, script: scriptText, members } })
+    const project = buildProject({ parse: { messages: msgs }, align, opts: { platform, mode, audio: audioPath, script: scriptText, members, groupName } })
     const r = await callTool('render', { project, audioPath, outputPath: out })
     if (!r.success) throw new Error('render 失败: ' + JSON.stringify(r))
     patchState(statePath, { current_step: 'RENDER', status: PROJECT_STATUS.SUCCEEDED, output: out })

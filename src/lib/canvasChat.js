@@ -3,6 +3,7 @@
 // 支持入场动画（pop/slide/fade）与消息间交叉淡化转场，无需 DOM 截图。
 // 纯逻辑 + Canvas 2D，无 DOM 依赖。
 import { avatarFor, genMemberAvatar, genMemberColor, avatarInitial } from './avatars.js'
+import { deriveChatTitle } from './chatTitle.js'
 
 // 贴纸路径解析：库在 /emojis/imgs/ 下；message.sticker 可能带纯文件名、imgs/ 前缀或完整 /emojis 路径
 function resolveStickerUrl(file) {
@@ -679,7 +680,7 @@ export function createChatFrameRenderer({
     return t <= i0.ds + 0.6
   }
 
-  function render(t, { messages, members, platform = 'wechat', mode = 'single', title: ttl = title, timing = null, duration = 0, centered = false, showAll = false } = {}) {
+  function render(t, { messages, members, platform = 'wechat', mode = 'single', title: ttl = title, groupName = '', timing = null, duration = 0, centered = false, showAll = false } = {}) {
     const showName = mode === 'group'
     const p = PLATFORM[platform] || PLATFORM.wechat
     const timingArr = deriveTiming(messages, timing, duration)
@@ -696,9 +697,12 @@ export function createChatFrameRenderer({
     ctx.fillRect(0, 0, width, height)
 
     // ---- 标题栏：仅“第一条消息”可见时（与首条同现同隐，像截图把标题一起截进去） ----
+    // 顶栏标题强制按规则派生：单聊=对方昵称/备注，群聊=群名称（见 deriveChatTitle）。
+    // 旧的硬编码默认值 '聊天记录视频' 一律被派生结果覆盖，确保与网页编辑同步。
+    const effTitle = ttl && ttl !== '聊天记录视频' ? ttl : deriveChatTitle(mode, members, groupName)
     const firstInfo = timingArr[0]
     const firstVisible = (!showAll) && firstInfo && t >= (firstInfo.ds - 0.25) && t <= (firstInfo.de + 0.25)
-    if (firstVisible && (ttl || mode === 'group')) {
+    if (firstVisible && (effTitle || mode === 'group')) {
       ctx.save()
       ctx.fillStyle = '#f7f7f7'
       ctx.fillRect(0, 0, width, TITLE_H)
@@ -709,7 +713,7 @@ export function createChatFrameRenderer({
       ctx.textBaseline = 'middle'
       ctx.textAlign = 'center'
       const showCount = mode === 'group' && members ? ` (${members.length})` : ''
-      ctx.fillText(`${ttl || '微信对话'}${showCount}`, width / 2, TITLE_H / 2 + 2)
+      ctx.fillText(`${effTitle || '微信对话'}${showCount}`, width / 2, TITLE_H / 2 + 2)
       ctx.textAlign = 'left'
       ctx.restore()
     }

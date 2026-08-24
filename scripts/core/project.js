@@ -3,6 +3,7 @@
 // 把 parseScript + alignDP 的结果装配成渲染用的 project 对象。
 
 import { defaultMembers } from '../../src/data/avatars.js'
+import { deriveChatTitle } from '../../src/lib/chatTitle.js'
 
 // 把消息数组还原成脚本文本（供 alignDP / 回显）
 export function buildScriptText(messages) {
@@ -49,7 +50,9 @@ export function buildProject({ parse, align, opts }) {
   }
   messages.forEach((m) => { delete m._explicitEnd })
   return {
-    title: opts.title || '聊天记录视频',
+    // 顶栏标题强制按规则派生（单一真相源 deriveChatTitle）：单聊=对方昵称，群聊=群名称。
+    // 不再使用硬编码默认值，确保音画同步视频顶栏与网页编辑一致。
+    title: deriveChatTitle(opts.mode, opts.members, opts.groupName),
     platform: opts.platform || 'wechat',
     mode: opts.mode || 'single',
     members: opts.members || (parse.messages?.length ? defaultMembers(['我', '对方']) : []),

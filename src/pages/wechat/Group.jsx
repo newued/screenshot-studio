@@ -94,6 +94,7 @@ export default function WechatGroup() {
             platform="wechat"
             mode="group"
             projectTitle={groupName || '微信群聊'}
+            groupName={groupName}
             script={script}
             onScriptChange={setScript}
             autoRun={DEEP.autoExport === 'video' || DEEP.autoExport === 'mp4' ? DEEP.autoExport : ''}

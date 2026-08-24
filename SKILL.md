@@ -43,7 +43,8 @@ screenshot-studio/
 - **Node ≥ 18** + `npm`（跑 vite / mcp-server / CLI）。
 - **Python 3.10+** 且含：`librosa`、`soundfile`、`numpy`、`faster-whisper`（mcp-server 的 `alignDP` 做节拍网格与 ASR 用）。
 - **ffmpeg**（视频渲染编码 + beatGrid 转 WAV；需在 PATH 中）。
-- **用户自备配音音频**（URL 或本地路径）。工具**不内置 TTS**，见 §13 硬约束。
+- **用户自备配音音频**（URL 或本地路径）。工具**不内置 TTS**，见 §13 硬约束
+- 开源部署 / 全新机器的**完整 Requirements、纯 CLI 出片路径、ASR 模型下载与离线兜底、已知卡点**见 `README.md`（agent-up 已自动处理依赖与模型预载，README 含 `run` 无浏览器用法与排错清单）。。
 
 ## 3. 一键 setup（首次 / 新机器）
 ```bash
@@ -212,7 +213,18 @@ Gospel-infused funk, dual powerful black male lead vocals, raspy soulful vocal t
 4. **`run --script @文件` 把文件路径当成了脚本内容**
    - 现象：`run` 读到的脚本只有 1 行且内容是文件路径。
    - 根因：`cmdRun` 用 `args['--script']` 直接取值，未走 `readArgVal`（后者支持 `@文件` 读取）。
-   - 已修复：`cmdRun` 改为 `readArgVal(args['--script'] || '')`，现在 `--script @文件` 正确读取文件内容。
+    - 已修复：`cmdRun` 改为 `readArgVal(args['--script'] || '')`，现在 `--script @文件` 正确读取文件内容。
+
+14. **视频顶栏标题固定为"聊天记录视频"，不按规则显示**
+    - 现象：生成的视频顶栏一律显示"聊天记录视频"，而非单聊=对方昵称/备注、群聊=群名称；网页改了昵称/群名视频也不同步。
+    - 根因：① 后端 `buildProject` 把 `title` 硬编码为 `'聊天记录视频'`，完全忽略传入的标题；② 单聊页 `Single.jsx` 把 `projectTitle` 写成固定 `"微信单聊"`（应是 members[1] 对方昵称）；③ `canvasChat` 直接画 `ttl` 参数，未做规则派生。
+    - 已修复：新增单一真相源 `src/lib/chatTitle.js` 的 `deriveChatTitle(mode, members, groupName)`——单聊取非"我"成员名、群聊取群名；`canvasChat.render` 顶栏、`buildProject`（后端渲染）、`VideoPipelinePanel`（网页预览/提交）三处统一调用该派生函数，`'聊天记录视频'` 默认值被强制覆盖；`submitPage` 新增 `groupName` 字段入状态。网页改昵称/头像/群名后随「确认页面信息」提交 `members/groupName`，视频顶栏即同步。
+
+13. **`run-page` 跳过「确认页面信息」闸门（跨会话陈旧确认泄漏）**
+    - 现象：上一轮会话用户已在网页点过「确认页面信息」，`pipeline_state.json` 残留 `page_confirmed:true` + `audio_path`；下一轮 agent 直接 `run-page` 就出片，完全没让用户重新核对/确认，也跳过了 `AskUserQuestion` 闸门。
+    - 根因：`open`/`genlink` 只把脚本作为 URL 参数注入浏览器，**从不改写 `pipeline_state.json`**，旧的人工确认状态不会因"新脚本注入"而失效。
+    - 已修复（Runtime 强制，而非靠 agent 自觉）：`open` / `genlink` 一旦检测到注入了新脚本或音频，立即调用 `rearmGate()` 把 `page_confirmed` 置 `false` 并清空 `audio_path`，闸门重新拉起。此后任何 `run-page` 都会因守卫 `!(page_confirmed && audio_path)` 失败而报错「网页尚未确认」，逼 agent 先 `open` + 用 `AskUserQuestion` 等用户确认。
+    - agent 行为约束（不可绕过）：**用户提供的是"新脚本"时，必须先 `open`（注入并自动重开闸门）→ 用 `AskUserQuestion` 等用户回「信息已确认」→ 再 `run-page`**。绝不允许在没重新确认的情况下直接对既有 `pipeline_state.json` 调 `run-page`。唯一例外是 `run`（用户显式授权全自动、且同时给了 `--audio --script`）。
 
 5. **`needs_review` 退出码 2 卡住，无法自动出片**
     - 现象：演唱体音频 ASR 漂移触发 `needs_review`，`run`/`run-page` 退出码 2 打印 `AI_HANDOFF_JSON` 后停下，等 agent 干预。

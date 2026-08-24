@@ -2,6 +2,9 @@
 node_modules/
 mcp-server/node_modules/
 
+# 运行时产物（项目 artifact 历史；迁移到用户数据目录后通常不在本目录生成，保留以防旧数据泄露入库）
+projects/
+
 # 构建产物
 dist/
 build/

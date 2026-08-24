@@ -80,7 +80,7 @@ B说：第二句台词
  * 网页「确认页面信息」回调：浏览器把音频 base64 + 用户核对的消息/成员发来，
  * 服务端落盘音频（产生 agent 可读取的真实本地路径），并写入 pipeline_state.json。
  */
-async function submitPage({ audioBase64, audioName, messages, members, title }) {
+async function submitPage({ audioBase64, audioName, messages, members, title, groupName }) {
   if (!audioBase64) throw new Error('缺少 audioBase64')
   const m = /^data:([^;]+);base64,(.*)$/.exec(audioBase64)
   const mime = m ? m[1] : ''
@@ -105,6 +105,7 @@ async function submitPage({ audioBase64, audioName, messages, members, title }) 
     audio_path: audioPath,
     audio_name: audioName || '',
     title: title || '',
+    groupName: groupName || '',
     messages: messages || [],
     members: members || [],
     submitted_at: new Date().toISOString(),
@@ -304,7 +305,7 @@ const TOOL_SCHEMAS = {
   alignDP: { type: 'object', properties: { audioPath: { type: 'string' }, audioBase64: { type: 'string' }, scriptText: { type: 'string' }, model: { type: 'string', default: loadAsrConfig().model }, hopLength: { type: 'number', default: 512 } }, required: ['scriptText'] },
   aiReview: { type: 'object', properties: { scriptText: { type: 'string' }, beatGrid: { type: 'array', items: { type: 'number' } }, rawSegments: { type: 'array' }, mapping: { type: 'array' } }, required: ['scriptText', 'beatGrid', 'mapping'] },
   aiApplyFix: { type: 'object', properties: { mapping: { type: 'array' }, fixes: { type: 'array' }, beatGrid: { type: 'array', items: { type: 'number' } } }, required: ['mapping', 'fixes'] },
-  submitPage: { type: 'object', properties: { audioBase64: { type: 'string' }, audioName: { type: 'string' }, messages: { type: 'array' }, members: { type: 'array' } }, required: ['audioBase64'] },
+  submitPage: { type: 'object', properties: { audioBase64: { type: 'string' }, audioName: { type: 'string' }, messages: { type: 'array' }, members: { type: 'array' }, title: { type: 'string' }, groupName: { type: 'string' } }, required: ['audioBase64'] },
   applyCreative: { type: 'object', properties: { scriptMessages: { type: 'array' }, creative: { type: 'array' } }, required: ['scriptMessages', 'creative'] },
   exportImage: { type: 'object', properties: { project: { type: 'object' }, mode: { type: 'string', default: 'full' }, outputDir: { type: 'string' } }, required: ['project'] },
   getWorkflow: { type: 'object', properties: {} },

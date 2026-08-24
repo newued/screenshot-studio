@@ -45,6 +45,8 @@ export default function WechatSingle() {
 
   const [videoOpen, setVideoOpen] = useState(() => DEEP.autoExport === 'video')
 
+  const singleTitle = members[1]?.name || '对方'
+
   return (
     <div className="page">
       <div className={`tool-shell ${aiOpen ? 'tool-shell--ai' : ''}`}>
@@ -79,7 +81,8 @@ export default function WechatSingle() {
             members={members}
             platform="wechat"
             mode="single"
-            projectTitle="微信单聊"
+            projectTitle={singleTitle}
+            groupName=""
             script={script}
             onScriptChange={setScript}
             autoRun={DEEP.autoExport === 'video' || DEEP.autoExport === 'mp4' ? DEEP.autoExport : ''}

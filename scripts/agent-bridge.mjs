@@ -35,12 +35,12 @@
 
 import { spawn, execSync } from 'node:child_process'
 import http from 'node:http'
-import { readFileSync, mkdirSync } from 'node:fs'
+import { readFileSync, mkdirSync, existsSync, rmSync } from 'node:fs'
 import { homedir } from 'node:os'
 import { join, resolve, dirname, isAbsolute } from 'node:path'
 import { fileURLToPath } from 'node:url'
 import { PROJECT_STATUS } from '../src/lib/pipelineContract.js'
-import { readState, writeState, patchState } from './core/state.js'
+import { readState, writeState, patchState, projectsBase } from './core/state.js'
 import { buildProject, buildScriptText } from './core/project.js'
 import { applyDecisionsToMessages, scoreEmotion, pickSticker, STICKER_THRESHOLD } from './core/decisions.js'
 import { callTool, health } from './core/client.js'
@@ -157,7 +157,7 @@ async function cmdRun(args) {
   }
 
   // 委托给 Planner（scripts/core/planner.js）执行生产计划；解析与决策合并都在 Planner 内完成
-  const res = await runProductionPlan({ statePath: STATE_PATH, projectId: 'default', audioPath: audio, scriptText: script, decisions, platform, mode, out, skipRender })
+  const res = await runProductionPlan({ statePath: STATE_PATH, projectId: 'default', audioPath: audio, scriptText: script, decisions, platform, mode, groupName: '', out, skipRender })
   if (res.needsReview) {
     console.log('\n=== AI_HANDOFF_JSON ===')
     console.log(JSON.stringify(res.handoff, null, 2))
@@ -217,6 +217,7 @@ async function cmdApplyFixes(args) {
       platform: state.platform || 'wechat',
       mode: state.mode || 'single',
       members: state.members || [],
+      groupName: (state.mode === 'group') ? (state.groupName || state.title || '') : '',
     })
     patchState(STATE_PATH, { current_step: 'RENDER', status: PROJECT_STATUS.SUCCEEDED, output: out })
     log('完成，输出：', out)
@@ -225,10 +226,10 @@ async function cmdApplyFixes(args) {
   }
 }
 
-async function renderStage({ align, parse, script, audio, out, platform, mode, members }) {
+async function renderStage({ align, parse, script, audio, out, platform, mode, members, groupName = '' }) {
   patchState(STATE_PATH, { current_step: 'RENDER', status: PROJECT_STATUS.RUNNING })
   mkdirSync(dirname(out), { recursive: true })
-  const project = buildProject({ parse, align, opts: { platform, mode, audio, script, members } })
+  const project = buildProject({ parse, align, opts: { platform, mode, audio, script, members, groupName } })
   log('render ...')
   const r = await callTool('render', { project, audioPath: audio, outputPath: out })
   if (!r.success) throw new Error('render 失败: ' + JSON.stringify(r))
@@ -251,6 +252,8 @@ async function cmdRunPage(args) {
   const audio = state.audio_path
   const messages = state.messages || []
   const members = state.members || []
+  // 群聊顶栏标题取群名称：state 里以 title 字段承载（网页确认时 group 模式传来的是群名）
+  const groupName = mode === 'group' ? (state.groupName || state.title || '') : ''
   const scriptText = buildScriptText(messages)
 
   // 语义决策：优先用 --decisions 文件；否则从页面已确认的 messages（含 sticker/effect）重建
@@ -267,7 +270,7 @@ async function cmdRunPage(args) {
   }
 
   // 委托给 Planner 执行（页面模式同样走统一生产计划）
-  const res = await runProductionPlan({ statePath: STATE_PATH, projectId: state.project_id || 'default', audioPath: audio, scriptText, messages, decisions, members, platform, mode, out, skipRender: !!args['--skip-render'] })
+  const res = await runProductionPlan({ statePath: STATE_PATH, projectId: state.project_id || 'default', audioPath: audio, scriptText, messages, decisions, members, platform, mode, groupName, out, skipRender: !!args['--skip-render'] })
   if (res.needsReview) {
     console.log('\n=== AI_HANDOFF_JSON ===')
     console.log(JSON.stringify(res.handoff, null, 2))
@@ -314,23 +317,21 @@ function cmdDoctor() {
   }
 }
 
-// 统一启动入口：后端(mcp) + 前端(vite) 一起静默拉起，并做自检
+// 统一启动入口：后端(mcp) + 前端(vite) 一起静默拉起，并做自检。
+// 关键：每次都先杀掉可能残留的旧进程再拉起，避免旧 mcp 进程缓存旧 canvasChat 等模块
+// （跨会话重开时最容易踩的坑：旧进程仍在跑、serve 的是编辑前的旧代码）。
+// 这样用户只需记 `up` 一个命令，无需手动 `down --all && up`。
 async function cmdUp() {
-  log('启动本地后端 + 前端（统一入口）...')
-  if (await health()) {
-    log('mcp-server 已在运行')
-  } else {
-    launchServerDetached()
-    for (let i = 0; i < 30; i++) { await sleep(1000); if (await health()) break }
-    if (await health()) { log('mcp-server 就绪') } else throw new Error('mcp-server 启动超时')
-  }
-  if (await ping(5173)) {
-    log('vite(5173) 已在运行')
-  } else {
-    launchViteDetached()
-    for (let i = 0; i < 40; i++) { await sleep(1000); if (await ping(5173)) break }
-    if (await ping(5173)) { log('vite(5173) 就绪') } else err('vite 启动超时（可手动 npm run dev）')
-  }
+  log('启动本地后端 + 前端（统一入口，强制拉起最新代码）...')
+  killPort(9527)
+  killPort(5173)
+  await sleep(800)
+  launchServerDetached()
+  for (let i = 0; i < 30; i++) { await sleep(1000); if (await health()) break }
+  if (await health()) { log('mcp-server 就绪') } else throw new Error('mcp-server 启动超时')
+  launchViteDetached()
+  for (let i = 0; i < 40; i++) { await sleep(1000); if (await ping(5173)) break }
+  if (await ping(5173)) { log('vite(5173) 就绪') } else err('vite 启动超时（可手动 npm run dev）')
   const { ok, warnings, caps } = runDoctor()
   log(`能力: chat_video=${caps.chat_video} asr=${caps.asr} ffmpeg=${caps.ffmpeg} python=${caps.python}`)
   if (!ok) {
@@ -341,11 +342,50 @@ async function cmdUp() {
   }
 }
 
+// 重置工作流状态：清空 pipeline_state.json。跨会话重开时若想彻底丢弃半截旧状态、从干净起点开始可用。
+// 默认只清状态文件；--all 额外清空项目 artifact 历史（用户数据目录 + 旧 <root>/projects）。
+// 不会删除 ASR 模型缓存（~/.cache/huggingface，受管依赖、可复用）。该命令由 agent 在需要时使用，用户通常无需手动调用。
+function cmdReset(args) {
+  const all = !!args['--all']
+  if (existsSync(STATE_PATH)) { rmSync(STATE_PATH, { force: true }); log('已清空 pipeline_state.json') }
+  else log('pipeline_state.json 不存在，跳过')
+  if (all) {
+    const base = projectsBase()
+    if (existsSync(base)) { rmSync(base, { recursive: true, force: true }); log('已清空项目历史: ' + base) }
+    const old = join(ROOT, 'projects')
+    if (existsSync(old)) { rmSync(old, { recursive: true, force: true }); log('已清空旧项目目录: ' + old) }
+  }
+  log('ASR 模型缓存保留（~/.cache/huggingface）。')
+  log('已重置；下次请重新 `open` / `run` 注入新素材。')
+}
+
+// 注入新脚本/音频时，强制让陈旧的人工确认闸门失效（防回归：跨会话残留的
+// page_confirmed:true 会泄漏，导致 agent 直接 run-page 跳过「确认页面信息」闸门）。
+// 仅在确实提供了新素材时才重置；清空 audio_path/audio_name 以强制重新上传配音。
+function rearmGate() {
+  const st = readState() || {}
+  if (st.page_confirmed || st.audio_path) {
+    patchState(STATE_PATH, {
+      page_confirmed: false,
+      audio_path: undefined,
+      audio_name: undefined,
+      status: PROJECT_STATUS.WAITING_USER,
+      current_step: 'SCRIPT',
+      output: undefined,
+    })
+    log('检测到旧的人工确认状态，已重置闸门（page_confirmed=false，已清空旧音频）。请在网页重新核对对话/头像/名称/配音并点「确认页面信息」。')
+    return true
+  }
+  return false
+}
+
 function cmdOpen(args) {
   let script = args['--script']
   if (script && script.startsWith('@')) {
     script = readFileSync(script.slice(1), 'utf8').trim()
   }
+  // 注入了新脚本/音频 → 失效旧确认闸门，确保必须回网页重新确认（人机协同硬约束）。
+  if (script || args['--audio']) rearmGate()
   openUI({ page: args._[0] || 'wechat/single', script, audio: args['--audio'] })
 }
 
@@ -368,6 +408,8 @@ function cmdGenlink(args) {
   const script = readArgVal(args['--script'] || '')
   const audio = args['--audio'] || ''
   const doOpen = !!args['--open']
+  // 注入新脚本/音频 → 失效旧确认闸门，避免后续 run-page 跳过人工确认（与 open 一致）。
+  if (script || audio) rearmGate()
 
   const params = new URLSearchParams()
   params.set('agent', '1') // 始终以 agent 模式打开，暴露「确认页面信息」按钮
@@ -517,6 +559,9 @@ async function main() {
       cancelProductionPlan(STATE_PATH, args._[0])
       log('已取消当前生产计划（CANCELLED）。')
       break
+    case 'reset':
+      cmdReset(args)
+      break
     case 'tag-stickers':
       cmdTagStickers(args)
       break
@@ -527,7 +572,7 @@ async function main() {
       await cmdDown(args)
       break
     default:
-      console.log(`用法: node scripts/agent-bridge.mjs <ensure|open|run|run-page|apply-fixes|tag-stickers|status> [选项]`)
+      console.log(`用法: node scripts/agent-bridge.mjs <ensure|open|run|run-page|apply-fixes|tag-stickers|status|doctor|setup-asr|up|down|reset|cancel> [选项]`)
       console.log(`  ensure`)
       console.log(`  open [page] [--script S] [--audio URL]       打开网页注入脚本/音频（自动拉起浏览器，带 ?agent=1）`)
       console.log(`  genlink [page] [--script S] [--audio U] [--open]  拼装深链 URL（自动 encodeURIComponent）；--open 直接打开浏览器`)
@@ -539,8 +584,9 @@ async function main() {
       console.log(`  status [--state FILE]`)
       console.log(`  doctor                        环境冒烟自检（STATE_PATH/能力就绪/ASR模型），用于排障`)
       console.log(`  setup-asr [model]             预下载 ASR 模型权重（受管依赖，需联网；离线则提示兜底）`)
-      console.log(`  up                            统一启动本地后端(mcp) + 前端(vite) 并自检（推荐日常入口，自动预载 ASR 模型）`)
+      console.log(`  up                            统一启动本地后端(mcp) + 前端(vite)，强制拉起最新代码（推荐日常入口；每次先杀残留旧进程，无需手动 down --all）`)
       console.log(`  down [--all]                  用户确认后关闭前端(vite 5173)，[--all] 同时关 mcp(9527)`)
+      console.log(`  reset [--all]                 清空工作流状态(pipeline_state.json)；--all 额外清空项目 artifact 历史（ASR 模型缓存保留）`)
       process.exitCode = 1
   }
 }
