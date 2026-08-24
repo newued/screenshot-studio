@@ -78,11 +78,13 @@ python -m pip install -r requirements.txt
    ```
    `open` 以 `?agent=1` 打开并注入脚本，且自动调起浏览器；agent **立即把对话交还用户**，不阻塞。
 2. **用户在网页操作**：核对/微调对话、头像、名称、题目 → 选配音文件 → 点「确认页面信息」（写 `pipeline_state.json`：`page_confirmed:true` + `audio_path`）。
-3. **agent 用问题工具向用户确认**（打开浏览器后**必须**这样做，不要只发一句话）：
-   - 用 question 工具提问：「页面信息（对话 / 头像 / 配音）是否已确认好？」
-   - 选项放「已经确认好」+ 开启自由输入框（custom）。
-   - 用户**点击「已经确认好」** → 直接执行下一步 `run-page`。
-   - 用户在输入框**输入了内容** → 按内容处理（如给出修改意见则先改脚本/决策再重开；若文字表示已确认则等同点击）。
+3. **agent 用 `AskUserQuestion` 工具向用户确认**（打开浏览器后**必须**这样做，不要只发一句话）：
+    - question: 「对话和配音都确认好了吗？（建议在网页核对/微调对话、头像、名称、题目，并上传配音后再确认）」
+    - options: ["已确认对话剧本并上传配音"]
+    - allow_free_text: true
+    - multi_select: false
+    - 用户**点击「已确认对话剧本并上传配音」** → 直接执行下一步 `run-page`。
+    - 用户在自由输入中提供了信息 → 按内容处理（如给出修改意见则先改脚本/决策再重开；若文字表示已确认则等同点击）。
    ```bash
    node scripts/agent-bridge.mjs run-page --out out.mp4
    ```
