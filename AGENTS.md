@@ -34,7 +34,7 @@
 
 ### 5.1 总流程
 ```
-① ensure        agent 起 mcp-server(:9527) + vite(:5173)
+① ensure/up     agent 用 `node scripts/agent-bridge.mjs up`（推荐）一键起 mcp-server(:9527) + vite(:5173)；或分步 `ensure` 仅起 mcp
 ② 生成脚本      按主题写对话脚本（或用户给素材）
 ③ open 注入      node scripts/agent-bridge.mjs open wechat/single --script @脚本.txt
                  （群聊 wechat/group / QQ qq；浏览器开 ?agent=1&script=... 自动注入）
@@ -84,7 +84,7 @@
 - `project.js`：项目组装（`buildProject`/`buildScriptText`）。
 - `decisions.js`：LLM 创意决策合并 + 贴纸确定性兜底。
 - `planner.js`：生产计划 `PRODUCTION_PLAN` + 执行器 `runProductionPlan`（每步 RUNNING，失败标 FAILED，可 `cancelProductionPlan` 标 CANCELLED）。
-- `agent-bridge.mjs`：仅做生命周期 + CLI 分发（`run`/`run-page`/`apply-fixes`/`tag-stickers`/`status`/`cancel`），编排一律委托 `planner.js`。
+- `agent-bridge.mjs`：仅做生命周期 + CLI 分发（`up`(推荐)/`ensure`/`open`/`run`/`run-page`/`apply-fixes`/`tag-stickers`/`status`/`doctor`/`cancel`），编排一律委托 `planner.js`。`up` 为一键拉起 mcp+vite 的推荐入口。
 
 ### 6.4 Project Entity 约定
 - 项目目录：`<root>/projects/<project_id>/artifacts/`；每步产物为不可变文件：`script.json`/`voiceover.json`/`effects.json`/`final.mp4`，路径登记回 `pipeline_state.json.artifacts[step]`。

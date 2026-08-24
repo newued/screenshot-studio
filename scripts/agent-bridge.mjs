@@ -21,9 +21,9 @@
  *   ensure                     确保 mcp-server 在跑（不在则后台拉起 --http-only）
  *   open [page] [--script S] [--audio URL]   以 ?agent=1 打开 UI（Windows 用默认浏览器）
  *   genlink [page] [--script S] [--audio U] [--open]  拼装深链 URL（仅注入脚本/音频）
- *   run  --audio A --script S [--platform wechat] [--mode single|group]
+ *   run  --audio A --script S [--decisions @决策.json] [--platform wechat] [--mode single|group]
  *        [--out out.mp4] [--skip-render]      跑 parseScript→alignDP→(render)
- *                                             needs_review 时打印交接包并以退出码 2 退出
+ *                                             --decisions 把贴纸/动效写回每句；needs_review 时打印交接包并以退出码 2 退出
  *   run-page [--platform wechat] [--mode single|group] [--out out.mp4]
  *                                             读网页已确认状态，串对齐+渲染
  *   apply-fixes --state FILE --fixes JSON     将 agent 产出的语义修正写入 mapping（调 aiApplyFix），重算 meta
@@ -34,6 +34,7 @@
  */
 
 import { spawn, execSync } from 'node:child_process'
+import http from 'node:http'
 import { readFileSync, mkdirSync } from 'node:fs'
 import { homedir } from 'node:os'
 import { join, resolve, dirname, isAbsolute } from 'node:path'
@@ -44,6 +45,8 @@ import { buildProject, buildScriptText } from './core/project.js'
 import { applyDecisionsToMessages, scoreEmotion, pickSticker, STICKER_THRESHOLD } from './core/decisions.js'
 import { callTool, health } from './core/client.js'
 import { runProductionPlan, cancelProductionPlan } from './core/planner.js'
+import { detectCapabilities } from './core/capabilities.js'
+import { runDoctor } from './core/doctor.js'
 
 const __dirname = dirname(fileURLToPath(import.meta.url))
 const ROOT = resolve(__dirname, '..')
@@ -55,24 +58,59 @@ const log = (...a) => console.log('[agent-bridge]', ...a)
 const err = (...a) => console.error('[agent-bridge]', ...a)
 
 // ====================== 生命周期 ======================
+// 后端/前端静默拉起：用 PowerShell Start-Process 创建真正独立的进程（不被调用方进程树追踪），
+// 否则命令结束时外层（bash 包装器）清理 detached child 会报 "Unknown: ChildProcess.kill"（#13）。
+function launchServerDetached() {
+  const entry = SERVER_ENTRY.replace(/\\/g, '/')
+  if (process.platform === 'win32') {
+    execSync(`powershell -NoProfile -Command "Start-Process 'node' -ArgumentList '${entry}','--http-only' -WindowStyle Hidden"`, { stdio: 'ignore' })
+  } else {
+    const child = spawn('node', [SERVER_ENTRY, '--http-only'], { cwd: ROOT, detached: true, stdio: 'ignore' })
+    child.unref()
+  }
+}
+
+function launchViteDetached() {
+  if (process.platform === 'win32') {
+    // npm 在 Windows 上是 npm.cmd，须经 cmd /c 启动
+    execSync(`powershell -NoProfile -Command "Start-Process 'cmd' -ArgumentList '/c','npm run dev' -WorkingDirectory '${ROOT}' -WindowStyle Hidden"`, { stdio: 'ignore' })
+  } else {
+    const child = spawn('npm', ['run', 'dev'], { cwd: ROOT, detached: true, stdio: 'ignore' })
+    child.unref()
+  }
+}
+
+function ping(port, pathname = '/') {
+  return new Promise((resolve) => {
+    const req = http.request({ host: '127.0.0.1', port, path: pathname, method: 'GET', timeout: 1500 }, (r) => {
+      r.resume()
+      resolve(r.statusCode > 0 && r.statusCode < 500)
+    })
+    req.on('error', () => resolve(false))
+    req.on('timeout', () => { req.destroy(); resolve(false) })
+    req.end()
+  })
+}
+
+const sleep = (ms) => new Promise((r) => setTimeout(r, ms))
+
 async function ensureServer() {
   if (await health()) {
     log('mcp-server 已在运行')
     return true
   }
   log('拉起 mcp-server (--http-only)...')
-  const child = spawn('node', [SERVER_ENTRY, '--http-only'], {
-    cwd: ROOT,
-    detached: true,
-    stdio: 'ignore',
-    windowsHide: true,
-  })
-  child.unref()
+  launchServerDetached()
   // 轮询等待就绪
   for (let i = 0; i < 30; i++) {
-    await new Promise((r) => setTimeout(r, 1000))
+    await sleep(1000)
     if (await health()) {
       log('mcp-server 就绪')
+      const { warnings } = runDoctor()
+      if (warnings.length) {
+        err('环境自检警告（doctor）：')
+        for (const w of warnings) err('  - ' + w)
+      }
       return true
     }
   }
@@ -109,8 +147,18 @@ async function cmdRun(args) {
   if (!audio) throw new Error('run 需要 --audio <音频路径或URL>')
   if (!script) throw new Error('run 需要 --script <脚本文本>')
 
+  // 语义贴纸/动效决策（可选）：把 decisions 写回每句消息的 sticker/effect，渲染才会有贴纸。
+  // 不传 --decisions 也能出片，但无语义贴纸（可用 tag-stickers 规则兜底或 apply-fixes 补）。
+  const baseMessages = buildScriptText(script).messages
+  let msgs = baseMessages
+  if (args['--decisions']) {
+    const raw = readArgVal(args['--decisions'])
+    const decisions = typeof raw === 'string' ? JSON.parse(raw) : raw
+    msgs = applyDecisionsToMessages(baseMessages, decisions)
+  }
+
   // 委托给 Planner（scripts/core/planner.js）执行生产计划
-  const res = await runProductionPlan({ statePath: STATE_PATH, projectId: 'default', audioPath: audio, scriptText: script, platform, mode, out, skipRender })
+  const res = await runProductionPlan({ statePath: STATE_PATH, projectId: 'default', audioPath: audio, scriptText: script, messages: msgs, platform, mode, out, skipRender })
   if (res.needsReview) {
     console.log('\n=== AI_HANDOFF_JSON ===')
     console.log(JSON.stringify(res.handoff, null, 2))
@@ -148,7 +196,7 @@ async function cmdApplyFixes(args) {
   const beatGrid = state.align_result.beat_grid || []
   log('aiApplyFix ...')
   const result = await callTool('aiApplyFix', { mapping, fixes: fixes.fixes || fixes, beatGrid })
-  patchState({
+  patchState(STATE_PATH, {
     current_step: 'SEMANTIC',
     status: PROJECT_STATUS.WAITING_AGENT,
     needs_review: !!result.mapping_meta.needs_review,
@@ -171,7 +219,7 @@ async function cmdApplyFixes(args) {
       mode: state.mode || 'single',
       members: state.members || [],
     })
-    patchState({ current_step: 'RENDER', status: PROJECT_STATUS.SUCCEEDED, output: out })
+    patchState(STATE_PATH, { current_step: 'RENDER', status: PROJECT_STATUS.SUCCEEDED, output: out })
     log('完成，输出：', out)
   } else {
     log('未提供音频/输出，仅写回修正（render 可后续手动触发）。')
@@ -179,7 +227,7 @@ async function cmdApplyFixes(args) {
 }
 
 async function renderStage({ align, parse, script, audio, out, platform, mode, members }) {
-  patchState({ current_step: 'RENDER', status: PROJECT_STATUS.RUNNING })
+  patchState(STATE_PATH, { current_step: 'RENDER', status: PROJECT_STATUS.RUNNING })
   mkdirSync(dirname(out), { recursive: true })
   const project = buildProject({ parse, align, opts: { platform, mode, audio, script, members } })
   log('render ...')
@@ -228,9 +276,57 @@ function cmdStatus() {
   if (!s) {
     err('无 pipeline_state.json')
     process.exitCode = 1
-    return
+  } else {
+    log('状态：', JSON.stringify(s, null, 2))
   }
-  log('状态：', JSON.stringify(s, null, 2))
+  // 能力探测（反馈⑤）：让 agent 在调用视频类命令前先看清 chat_video/asr 是否就绪。
+  const caps = detectCapabilities()
+  const ready = caps.ffmpeg && caps.python
+  log(`能力: chat_image=${caps.chat_image} chat_video=${caps.chat_video} asr=${caps.asr} semantic=${caps.semantic} ffmpeg=${caps.ffmpeg} python=${caps.python} (ready=${ready})`)
+  if (!ready) err('能力未就绪：缺 ffmpeg 或 python 时视频生成/ASR 会失败（图片导出仍可）。')
+}
+
+function cmdDoctor() {
+  const { ok, caps, checks, warnings } = runDoctor()
+  console.log('=== 环境自检 doctor ===')
+  for (const c of checks) {
+    console.log(`[${c.ok ? 'OK' : 'X'}] ${c.name}: ${c.detail}`)
+  }
+  console.log('能力:', JSON.stringify(caps))
+  if (ok) {
+    log('结果：全部就绪 ✓')
+  } else {
+    err('存在未就绪项：')
+    for (const w of warnings) err('  - ' + w)
+    process.exitCode = 1
+  }
+}
+
+// 统一启动入口：后端(mcp) + 前端(vite) 一起静默拉起，并做自检
+async function cmdUp() {
+  log('启动本地后端 + 前端（统一入口）...')
+  if (await health()) {
+    log('mcp-server 已在运行')
+  } else {
+    launchServerDetached()
+    for (let i = 0; i < 30; i++) { await sleep(1000); if (await health()) break }
+    if (await health()) { log('mcp-server 就绪') } else throw new Error('mcp-server 启动超时')
+  }
+  if (await ping(5173)) {
+    log('vite(5173) 已在运行')
+  } else {
+    launchViteDetached()
+    for (let i = 0; i < 40; i++) { await sleep(1000); if (await ping(5173)) break }
+    if (await ping(5173)) { log('vite(5173) 就绪') } else err('vite 启动超时（可手动 npm run dev）')
+  }
+  const { ok, warnings, caps } = runDoctor()
+  log(`能力: chat_video=${caps.chat_video} asr=${caps.asr} ffmpeg=${caps.ffmpeg} python=${caps.python}`)
+  if (!ok) {
+    err('环境自检有未就绪项：')
+    for (const w of warnings) err('  - ' + w)
+  } else {
+    log('全部就绪 ✓ 打开 http://localhost:5173 即可使用')
+  }
 }
 
 function cmdOpen(args) {
@@ -293,7 +389,7 @@ function cmdTagStickers(args) {
     const sticker = pickSticker(score, m.content)
     return { ...m, _emo: +score.toFixed(2), sticker }
   })
-  patchState({ script_messages: tagged, messages: tagged })
+  patchState(STATE_PATH, { script_messages: tagged, messages: tagged })
   log(`THRESHOLD=${STICKER_THRESHOLD}  贴纸标注完成：`)
   tagged.forEach((m, i) => log(`  ${i} [${m._emo}] ${m.speaker}: ${m.content} -> ${m.sticker || '(无贴纸)'}`))
   const n = tagged.filter((m) => m.sticker).length
@@ -347,6 +443,12 @@ async function main() {
     case 'status':
       cmdStatus()
       break
+    case 'doctor':
+      cmdDoctor()
+      break
+    case 'up':
+      await cmdUp()
+      break
     case 'cancel':
       cancelProductionPlan(STATE_PATH, args._[0])
       log('已取消当前生产计划（CANCELLED）。')
@@ -359,12 +461,14 @@ async function main() {
       console.log(`  ensure`)
       console.log(`  open [page] [--script S] [--audio URL]       打开网页注入脚本/音频（自动拉起浏览器，带 ?agent=1）`)
       console.log(`  genlink [page] [--script S] [--audio U] [--open]  拼装深链 URL（自动 encodeURIComponent）；--open 直接打开浏览器`)
-      console.log(`  run --audio A --script S [--platform wechat] [--mode single|group] [--out out.mp4] [--skip-render]`)
+      console.log(`  run --audio A --script S [--decisions @决策.json] [--platform wechat] [--mode single|group] [--out out.mp4] [--skip-render]`)
       console.log(`  run-page [--platform wechat] [--mode single|group] [--out out.mp4]`)
       console.log(`           （用户回来说「信息已确认」后再调：读网页最新脚本/头像/名称/配音，串对齐+渲染）`)
       console.log(`  apply-fixes [--state FILE] --fixes JSON  （音频/输出自动从 pipeline_state.json 取）`)
       console.log(`  tag-stickers [--state FILE]           语义贴纸标注（情绪度≥${STICKER_THRESHOLD} 才带贴纸，写回 script_messages.sticker）`)
       console.log(`  status [--state FILE]`)
+      console.log(`  doctor                        环境冒烟自检（STATE_PATH/能力就绪），用于排障`)
+      console.log(`  up                            统一启动本地后端(mcp) + 前端(vite) 并自检（推荐日常入口）`)
       process.exitCode = 1
   }
 }

@@ -19,10 +19,10 @@ export async function callTool(tool, params = {}) {
 export async function health() {
   try {
     const res = await fetch(`${BASE}/health`, { signal: AbortSignal.timeout(2000) })
-    const data = await res.json()
-    return data.status === 'ok'
+    if (!res.ok) return null
+    return await res.json() // 含 { status, ready, capabilities }
   } catch {
-    return false
+    return null
   }
 }
 

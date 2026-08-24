@@ -1,16 +1,26 @@
-# AI 全自动出片：深链接协议
+# AI 协作出片：脚本与决策格式
 
-本应用支持「人只给主题，AI 全自动完成出片」。AI 系统（codex / workbuddy 等）按以下协议构造深链接，浏览器打开后自动完成：脚本注入 → 决策（贴纸/动画）→ 配音 → 时间轴 → 渲染 MP4。全程用户无需操作（除首次打开页面）。
+> 早期版本提供过「深链接 `export=mp4` 零确认自动渲染」协议，**该模式已移除**。本工具坚持人机协同：深链接只负责**注入脚本/音频**，渲染必须由 agent 调 `run` / `run-page` 在用户确认后触发。本文档保留对 agent 仍有用的**脚本语法**与**决策 JSON 格式**（用于 `run --decisions`）。
 
-## 深链接参数总览
+## 当前推荐流程（agent 侧）
+
+1. **主题 → 脚本**：把用户主题扩展成有冲突/情绪起伏的对话，含红包/转账/语音等丰富类型。
+2. **打开网页注入**（可选，让用户自行核对）：`node scripts/agent-bridge.mjs open wechat/single --script @剧本.txt --audio <URL>`，或 `genlink ... --open` 拼深链。
+3. **用户在网页**：核对对话/头像/名称 → 选配音 → 点「确认页面信息」（网页落盘 `audio_path` + `page_confirmed`）。
+4. **agent 跑后端**：
+   - 网页模式：`run-page`（读取已确认状态，串对齐+渲染）。
+   - 手动模式：`run --audio <URL> --script @剧本.txt [--decisions @决策.json] --out out.mp4`。
+5. 若触发 `needs_review`：`run` 打印 `AI_HANDOFF_JSON` 并退出码 2；agent 基于交接包产 fixes，调 `apply-fixes` 写回（自动续渲染）。
+
+## 深链接参数（仅注入，不再支持 `export`）
+
+`open` / `genlink` 拼出的深链接形如 `http://localhost:5173/wechat/single?agent=1&script=<ENC>&audio=<ENC>`：
 
 | 参数 | 必填 | 说明 |
 |---|---|---|
-| `script` | 是 | 聊天脚本文本（`encodeURIComponent`），语法见下方 |
-| `export` | 是 | `mp4` 或 `video`：浏览器直出 MP4 并自动下载 |
-| `decisions` | 否 | 决策 JSON 数组（每消息 emotion/sticker/effect），AI 语义判断后直传 |
-| `timeline` | 否 | 时间轴 JSON 数组（每消息 display_start/display_end），AI 精确对齐配音后直传 |
-| `audio` | 否 | 配音文件 URL（AI 已放好的音频，浏览器 fetch 后自动载入） |
+| `agent` | 是 | 固定 `1`：以 agent 模式打开，暴露「确认页面信息」按钮 |
+| `script` | 否 | 聊天脚本文本（`encodeURIComponent`），语法见下方 |
+| `audio` | 否 | 配音文件 URL，浏览器 fetch 后载入供用户预览 |
 
 > **平台由 URL 路径决定（不是 query 参数）**：`/wechat/single`（单聊）、`/wechat/group`（群聊）、`/qq/chat`（QQ）。
 
@@ -33,56 +43,22 @@ B说：[视频未接]
 - 特殊消息用 `[类型：内容]` 括号语法
 - 决策 `sticker` 只填**贴纸文件名**（如 `angry_01.png`），不填完整路径；`effect` 取值 `pop_in` / `slide_in_left` / `slide_in_right` / `fade_in`；`emotion` 取值 `happy` / `sad` / `angry` / `surprise` / `neutral`
 
-## 决策 JSON 格式
+## 决策 JSON 格式（`run --decisions @文件`）
 
-数组元素与脚本消息一一对应：
+数组元素与脚本消息一一对应；`run` 内部会把 `sticker` 的 **kind** 自动映射为 `effectsCatalog.js` 里的 **file**（如 `angry→angry_01.png`）：
 
 ```json
 [
   { "emotion": "neutral", "sticker": "", "effect": "fade_in" },
-  { "emotion": "angry", "sticker": "angry_01.png", "effect": "pop_in" }
+  { "emotion": "angry", "sticker": "angry", "effect": "pop_in" }
 ]
 ```
 
-若省略 `decisions`，浏览器会用内置规则自动生成（用户零决策）。
-
-## 时间轴 JSON 格式
-
-用于精确音画同步（AI 已把配音按句切分、标注起止秒）：
-
-```json
-[
-  { "display_start": 0.0, "display_end": 2.4 },
-  { "display_start": 2.4, "display_end": 8.4 }
-]
-```
-
-若省略 `timeline`，浏览器按文字长度估算，仍可出片（粗略同步）。
-
-## 完整示例
-
-AI 收到主题「朋友借钱不还」后，生成以下深链接并打开：
-
-```
-https://localhost:5173/wechat/group?script=<encodeURIComponent(脚本)>&decisions=<encodeURIComponent(决策JSON)>&timeline=<encodeURIComponent(时间轴JSON)>&audio=http://localhost:8899/voice.mp3&export=mp4
-```
-
-打开后浏览器自动：
-1. 注入脚本、决策、时间轴、音频
-2. 等待音频就绪（最多 8s，失败则静音兜底）
-3. 自动触发「导出 MP4 直出」，完成渲染并下载
-
-## 建议步骤（AI 侧）
-
-1. **主题 → 脚本**：把用户主题扩展成有冲突/情绪起伏的对话，含红包/转账/语音等丰富类型
-2. **脚本 → 时间轴**：若已生成配音，用配音时长切分每句的 `display_start/display_end`
-3. **脚本 → 决策**：逐句判断情绪、选贴纸（贴纸清单见 `src/lib/effectsCatalog.js`，素材在 `public/emojis/imgs/`）、定入场动画
-4. **配音**：TTS 生成后放置到本地静态服务器（如 `python -m http.server 8899`）或任意可达 URL
-5. **构造深链接**：`encodeURIComponent` 各参数后拼接，浏览器打开即全自动出片
+省略 `--decisions` 也能出片，但无语义贴纸（可改用 `tag-stickers` 规则兜底，或 `apply-fixes` 补）。
 
 ## 路径
 
 - 应用：`wechat/group`（群聊）、`wechat/single`（单聊）、`qq/chat`（QQ）
 - 贴纸清单：`src/lib/effectsCatalog.js`（素材目录 `public/emojis/imgs/`）
 - 深链接解析：`src/lib/deepLink.js`
-- 自动导出逻辑：`src/components/ui/VideoPipelinePanel.jsx`（`injectedTimeline`/`injectedAudio` + `autoRun`）
+- 确认/导出 UI：`src/components/ui/VideoPipelinePanel.jsx`

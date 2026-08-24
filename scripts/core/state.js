@@ -3,7 +3,8 @@
 // 仅负责 pipeline_state.json 的读写与 Project Entity 路径约定；不含任何编排逻辑。
 
 import { readFileSync, writeFileSync, mkdirSync } from 'node:fs'
-import { join, dirname } from 'node:path'
+import { join, dirname, resolve } from 'node:path'
+import { fileURLToPath } from 'node:url'
 import { writeFile } from 'node:fs/promises'
 import {
   STEP_ORDER,
@@ -12,8 +13,12 @@ import {
   projectDirName,
 } from '../../src/lib/pipelineContract.js'
 
+// 真相源默认路径（与 agent-bridge.mjs / registry.js 的 STATE_PATH 一致：<root>/pipeline_state.json）
+const ROOT = resolve(dirname(fileURLToPath(import.meta.url)), '..', '..')
+export const STATE_PATH = join(ROOT, 'pipeline_state.json')
+
 // ---- 真相源读写 ----
-export function readState(statePath) {
+export function readState(statePath = STATE_PATH) {
   try {
     return JSON.parse(readFileSync(statePath, 'utf8'))
   } catch {
@@ -21,13 +26,13 @@ export function readState(statePath) {
   }
 }
 
-export function writeState(statePath, state) {
+export function writeState(statePath = STATE_PATH, state) {
   mkdirSync(dirname(statePath), { recursive: true })
   writeFileSync(statePath, JSON.stringify(state, null, 2), 'utf8')
   return state
 }
 
-export function patchState(statePath, patch) {
+export function patchState(statePath = STATE_PATH, patch) {
   const s = readState(statePath) || {}
   const next = { ...s, ...patch, updated_at: new Date().toISOString() }
   writeState(statePath, next)
@@ -51,22 +56,44 @@ export function artifactPath(root, projectId, step) {
   return join(artifactDir(root, projectId), file)
 }
 
-// 把某步产物作为不可变 artifact 落盘到 projects/<id>/artifacts/<step>.json
-// 同时把最新一份回写进 pipeline_state.json（保持浏览器轮询看到的活真相源不变）。
+// 把某步产物作为不可变 artifact 落盘（反馈③：版本化，而非覆盖）。
+// 布局：projects/<id>/artifacts/<step>/v1.json, v2.json, ...
+// 同时把最新一份路径登记进 pipeline_state.json.artifacts[step]（保持浏览器轮询入口不变），
+// 并把全部版本记录到 artifacts_versions[step]，支持 revertArtifact 回滚。
 export async function persistArtifact(statePath, projectId, step, data) {
   const root = dirname(statePath) // <root>/pipeline_state.json → <root>
-  const dir = artifactDir(root, projectId)
+  const dir = join(artifactDir(root, projectId), step) // artifacts/<step>/
   mkdirSync(dir, { recursive: true })
-  const file = artifactPath(root, projectId, step)
-  await writeFile(file, JSON.stringify(data, null, 2), 'utf8')
 
-  // 回写活真相源（pipeline_state.json 仍是浏览器轮询入口，不破坏握手）
   const s = readState(statePath) || {}
+  const versions = (s.artifacts_versions && s.artifacts_versions[step]) || []
+  const n = versions.length + 1
+  const file = join(dir, `v${n}.json`)
+  await writeFile(file, JSON.stringify(data, null, 2), 'utf8')
+  versions.push(file)
+
   s.artifacts = s.artifacts || {}
   s.artifacts[step] = file
+  s.artifacts_versions = s.artifacts_versions || {}
+  s.artifacts_versions[step] = versions
   s.updated_at = new Date().toISOString()
   writeState(statePath, s)
   return file
+}
+
+// 回滚某步到指定版本（默认最新）。返回回滚后的文件路径。
+export async function revertArtifact(statePath, projectId, step, version) {
+  const root = dirname(statePath)
+  const s = readState(statePath) || {}
+  const versions = (s.artifacts_versions && s.artifacts_versions[step]) || []
+  const target = version ? join(artifactDir(root, projectId), step, `v${version}.json`) : versions[versions.length - 1]
+  const idx = versions.indexOf(target)
+  if (idx < 0) throw new Error(`artifact 回滚失败：步骤 ${step} 无版本 ${version || 'latest'}`)
+  s.artifacts = s.artifacts || {}
+  s.artifacts[step] = versions[idx]
+  s.updated_at = new Date().toISOString()
+  writeState(statePath, s)
+  return versions[idx]
 }
 
 export { STEP_ORDER, STEP_ARTIFACTS, PROJECT_STATUS }

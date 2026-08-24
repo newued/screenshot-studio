@@ -34,7 +34,7 @@ screenshot-studio/
 │   ├── package.json
 │   └── tools/            # alignDP / aiReview / aiApplyFix / render / beatGrid ...
 ├── scripts/              # 编排 CLI
-│   ├── agent-bridge.mjs  # ensure/open/run/run-page/apply-fixes/genlink/status/tag-stickers
+│   ├── agent-bridge.mjs  # up(推荐)/ensure/open/run/run-page/apply-fixes/genlink/status/tag-stickers/doctor
 │   └── agent-up.mjs      # 一键拉起 + 依赖自检
 └── docs/                 # ai-automation.md / PRD 等参考
 ```
@@ -90,10 +90,11 @@ python -m pip install -r requirements.txt
 4. **语义决策（贴纸/动效，不可跳过）**：`run-page` / `apply-fixes` **只修正时间轴，不会自动加贴纸**。必须给每条消息写入 `sticker`（库内文件名，见 `src/lib/effectsCatalog.js` 的 `STICKERS[].file`），否则视频无贴纸。
    - 规则兜底：`node scripts/agent-bridge.mjs tag-stickers`（情绪度≥0.4 才带贴纸）。**注意**：对「发疯吐槽 / 黑色幽默」类脚本常触发不了（脚本里没有它预设的"滚/闭嘴/我说了算"等触发词），此时必须用 LLM 决策。
    - LLM 决策（推荐用于演唱体 / 黑色幽默）：用 `src/lib/decisionPrompt.js` 的提示词产出 `decisions` 数组（emotion/sticker/effect），把 `sticker` 的 **kind** 映射为 `effectsCatalog.js` 里的 **file**（如 `angry→angry_01.png`、`shock→surprise_01.png`、`question→怀疑人生.jpg`、`speechless→动态小表情-无语了.gif`、`laugh→happy_01.png`、`awesome→懂了，优秀.gif`），写回 `pipeline_state.json` 的 `script_messages[i].sticker`，再渲染。
-   - **一步出带贴纸视频（推荐）**：用 `run` 命令直接带 `--decisions @决策文件.json` 即可一步完成「对齐 + 贴纸 + 渲染」（`run` 内部会把 `sticker` 的 kind 自动映射为文件名，且 needs_review 时自动用 ASR 真实演唱时刻修正并渲染，不再退出等干预）：
-     ```bash
-      node scripts/agent-bridge.mjs run --audio <URL或路径> --script @剧本.txt --decisions @决策.json --out out.mp4
+    - **一步出带贴纸视频（推荐）**：用 `run` 命令直接带 `--decisions @决策文件.json` 即可一步完成「对齐 + 贴纸 + 渲染」（`run` 内部会把 `sticker` 的 kind 自动映射为文件名）。`--decisions` 可省略，省略则出片无语义贴纸（可改用 `tag-stickers` 规则兜底）：
+      ```bash
+       node scripts/agent-bridge.mjs run --audio <URL或路径> --script @剧本.txt --decisions @决策.json --out out.mp4
       ```
+      > 若音频触发 `needs_review`，`run` 会打印 `AI_HANDOFF_JSON` 并以**退出码 2** 退出（不会自动跳过）；agent 基于交接包产 fixes 再调 `apply-fixes` 写回，最后 `apply-fixes` 自动续渲染。
       > 不传 `--out` 时，视频/图片默认输出到用户本机 `~/Downloads/screenshot-studio/`（Windows 即 `C:\Users\<用户>\Downloads\screenshot-studio\`），**不写入技能目录**，避免污染技能包。
      决策文件格式（`src/lib/decisionPrompt.js`）：`[{ "emotion":"angry", "sticker":"angry", "effect":"shake" }, ...]`（与消息一一对应，sticker 用 kind）。
 5. **若 `run-page` 触发 `needs_review`**：用 `apply-fixes` 修时间轴。关键：**演唱/说唱类音频，修正包时间必须基于 ASR 真实演唱时刻**（`pipeline_state.json` 的 `align_result.asr_segments` 每条带 `start/end`），**不要按节拍网格均匀均分**——均分会让气泡与歌声对不上（音画不同步）。`apply-fixes` 会把时间**吸附到最近拍点**，所以修正包时间须落在拍点范围内（工具现已修复时长：beatGrid 先用 ffmpeg 转 WAV 再分析，`duration` 取真实音频长，不再被 MP3 头截断）。
@@ -103,21 +104,26 @@ python -m pip install -r requirements.txt
    `apply-fixes` 写回修正后会**自动渲染**；贴纸来自步骤 4 写回的 `script_messages`。
 6. 交付 MP4。
 
-#### 路径 A —— 零确认全自动（仅限用户明确要求"全自动/零操作"且已给音频 URL）
-> ⚠ 该模式用 `export=mp4` 深链，**会绕过「确认页面信息」闸门直接渲染**，仅当用户主动要求零确认时使用。
-1. **主题 → 脚本**：按 `docs/ai-automation.md` 语法写对话（含红包/转账/语音等类型更生动）。
-2. **生成配音**：Suno/妙响 产出 MP3，放到本地静态服务（如 `python -m http.server 8899`），得到 `audio` URL。
-3. **LLM 决策**：用模型产出
-   - `decisions`：每句 `{emotion, sticker, effect}`（贴纸清单见 `src/lib/effectsCatalog.js`）
-   - `timeline`：每句 `{display_start, display_end}`（按配音时长切分，做精确音画同步）
-4. **拼深链并打开**（用 `genlink` 自动 encode，且 `--open` 直接开浏览器）：
-   ```bash
-   node scripts/agent-bridge.mjs genlink wechat/single --script @剧本.txt --audio <URL> --decisions @d.json --timeline @t.json --export mp4 --open
-   ```
-   浏览器自动注入 → 等音频就绪 → 渲染 MP4 并下载。
-   > 省略 `decisions`/`timeline` 时浏览器用内置规则兜底，仍可出片（粗略同步）。
+#### 关于"零确认全自动"
+> 早期版本提供过 `genlink ... --export mp4` 绕过「确认页面信息」闸门直接渲染的"零确认"模式，**该模式已移除**。本工具坚持人机协同：无论 `run` 还是 `run-page`，都必须由用户先确认页面信息（或 agent 显式拿到音频 + 脚本），不存在"一键全自动出片"。原因：音画同步与语义贴纸是硬要求，自动跳过确认会产出无贴纸/不同步的废片。
 
 > 群聊把路径里的 `wechat/single` 换成 `wechat/group`（成员在网页 MembersEditor 增删）。
+
+#### 两个生产入口（务必分清，避免 Agent 混淆）
+系统有两条生产路径，**产品语义必须明确**，否则 Agent 会乱用：
+
+- **`run` = Agent 全自动生产 API**：当 Agent 已显式拿到「完整脚本 + 音频 + 全部必要信息」且**用户明确授权全自动**时使用。直接 `parseScript → alignDP → render`，不要求网页确认。
+- **`run-page` = Human-in-the-loop 生产 API**：用户在网页核对 / 选配音 / 点「确认页面信息」后，Agent 调 `run-page` 读取 `page_confirmed + audio_path` 进入后端。
+
+调用原则（推荐第二种）：
+> **只有用户明确授权全自动且输入完整时，才允许用 `run` 绕过网页确认；否则一律 `open → 用户确认 → run-page`。**
+
+默认主流程（绝大多数情况）：
+```
+open → 用户确认 → run-page → (needs_review? → apply-fixes) → render
+```
+
+> 视频任务前先用 `status` 或 `/api/health` 看 `capabilities`：`chat_video=false` / `asr=false` 时说明缺 ffmpeg / python，应停止视频生成并提示装依赖，不要硬调 `run-page`。
 
 ### 目标二：打开网页让用户自己导出全图/切片
 图片导出（整图/切片）是网页**默认按钮**，不需要 `?agent=1`。
@@ -135,13 +141,17 @@ python -m pip install -r requirements.txt
 | 命令 | 作用 |
 |---|---|
 | `ensure` | 确保 mcp-server 在跑（不在则后台拉起） |
-| `open [page] [--script S] [--audio U] [--export video]` | 开网页并注入（不带 `--export` 即只注入）；自动调起浏览器 |
-| `genlink [page] [--script S] [--audio U] [--decisions J] [--timeline J] [--export mp4\|video\|full\|slices] [--open]` | 拼装深链 URL（自动 encode）；`--export mp4/video` = 零确认自动出片(含 ?agent=1，绕过确认闸门，仅限用户明确要求时)；`--open` 直接开浏览器 |
-| `run --audio A --script S [--decisions D] [--platform wechat] [--mode single\|group] [--out O] [--skip-render]` | 脚本+音频直接跑对齐/渲染；`--decisions @文件` 一步带上语义贴纸/动效并自动出片（needs_review 时自动用 ASR 真实时刻修正，不再退出等干预） |
+| `open [page] [--script S] [--audio U]` | 以 `?agent=1` 开网页并注入脚本/音频（仅注入，不自动出片）；自动调起浏览器 |
+| `genlink [page] [--script S] [--audio U] [--open]` | 拼装深链 URL（自动 encode，仅注入脚本/音频，`?agent=1`）；`--open` 直接开浏览器。**不再支持 `--decisions/--timeline/--export`**（零确认出片模式已移除） |
+| `run --audio A --script S [--decisions D] [--platform wechat] [--mode single\|group] [--out O] [--skip-render]` | 脚本+音频直接跑对齐/渲染；`--decisions @文件` 一步带上语义贴纸/动效（省略则无贴纸）。`needs_review` 时打印 `AI_HANDOFF_JSON` 并退出码 2，需 `apply-fixes` 续渲染 |
 | `run-page [--out O]` | 读网页已确认状态跑后端 |
-| `apply-fixes --fixes JSON` | 写回 LLM 语义修正 |
-| `tag-stickers` | 情绪打分 → 贴纸标注写回 |
+| `apply-fixes --fixes JSON` | 写回 LLM 语义修正（自动续渲染） |
+| `tag-stickers` | 情绪打分 → 贴纸标注写回（规则兜底） |
 | `status` | 查看 `pipeline_state.json` 真相源 |
+| `up` | **推荐日常入口**：一键静默拉起后端(mcp)+前端(vite) 并自检（修复启动终端报错 #13） |
+| `doctor` | 环境冒烟自检（STATE_PATH/能力就绪），排障用 |
+
+> ASR（faster-whisper）为可选项：未安装时 `alignDP` 自动退化为「脚本文本 + 节拍网格均匀切片」的语义均分兜底（`auto_fallback:true`），仍可正常出片，只是对齐精度为节拍级而非逐字级。
 
 ## 6. MCP 工具（:9527，OpenCode/Codex 可直接 tool-call）
 `parseScript` / `alignDP` / `aiReview` / `aiApplyFix` / `render` / `transcribe` / `beatGrid` / `export` / `creative`
@@ -162,7 +172,7 @@ python -m pip install -r requirements.txt
 【输出格式】每行 `说话人字母说：内容`（说话人用 A/B/C 单字母；群聊可到 C/D）：
 A说：……
 B说：……
-生成后可直接 `node scripts/agent-bridge.mjs genlink wechat/single --script @剧本.txt --export mp4 --open`。
+生成后可直接 `node scripts/agent-bridge.mjs genlink wechat/single --script @剧本.txt --open` 打开网页注入脚本，再由用户在网页确认并导出。
 
 ### 福音放克斯配音提示词（优化版，Suno 可用）
 曲风 Prompt（首行，已补 Mandarin Chinese 发音约束，避免 Suno 唱成英文）：
@@ -203,8 +213,8 @@ Gospel-infused funk, dual powerful black male lead vocals, raspy soulful vocal t
    - 已修复：`cmdRun` 改为 `readArgVal(args['--script'] || '')`，现在 `--script @文件` 正确读取文件内容。
 
 5. **`needs_review` 退出码 2 卡住，无法自动出片**
-   - 现象：演唱体音频 ASR 漂移触发 `needs_review`，`run-page` 退出码 2 打印交接包后停下，等人工干预。
-   - 已修复：新增 `--decisions` 参数。带 `--decisions` 时，`run` 在 `needs_review` 分支**自动用 ASR 真实演唱时刻生成修正并直接渲染**，不再退出等干预（见 §4 步骤 4 一步出片）。不带 `--decisions` 时维持原 exit 2 交 agent 干预。
+    - 现象：演唱体音频 ASR 漂移触发 `needs_review`，`run`/`run-page` 退出码 2 打印 `AI_HANDOFF_JSON` 后停下，等 agent 干预。
+    - 现状：`--decisions` 只负责把贴纸/动效写回每句消息，**不会**自动跳过 `needs_review`。`run` 在 `needs_review` 时仍会打印交接包并以退出码 2 退出；agent 需基于 `AI_HANDOFF_JSON` 产出 fixes，再调 `apply-fixes` 写回（其会自动续渲染）。这是人机协同的硬闸门，不是 bug。
 
 6. **`agent-up` 启动后端失败：ENOENT / EINVAL**
    - 现象：`spawn npm ENOENT`（Windows 上 npm 实为 `npm.cmd`）；改成 `npm.cmd` 后又 `spawn EINVAL`（`.cmd` 不能直接 detached）。
@@ -248,7 +258,7 @@ Gospel-infused funk, dual powerful black male lead vocals, raspy soulful vocal t
 | 网页打不开 `localhost:5173` | vite 没起 / 端口被占 | 看 agent-up 输出哪个端口没起；关掉占用进程重跑 |
 | 视频只有前半段 / 气泡对不上歌声 | MP3 头时长错误（旧代码） | 已修复（beatGrid 先转 WAV）。若仍出现，确认 `mcp-server/` 代码是最新版并**重启 agent-up** |
 | 视频完全没有贴纸 | 语义决策被跳过 | 用 `run --decisions @决策.json` 一步出带贴纸视频；或手动把 `sticker` 写回 `script_messages` |
-| `run-page` 退出码 2 打印 AI_HANDOFF_JSON 后停下 | 演唱体 ASR 漂移触发 needs_review | 带 `--decisions` 重跑 `run` 即可自动过；或按交接包产 fixes 再 `apply-fixes` |
+| `run`/`run-page` 退出码 2 打印 AI_HANDOFF_JSON 后停下 | 演唱体 ASR 漂移触发 needs_review | 按交接包（`reviewItems`+`prompt`）产 fixes，调 `apply-fixes` 写回（自动续渲染）；`--decisions` 只管贴纸、不能绕过此闸门 |
 | 渲染出来没声音 | 没给音频 / 音频路径错 | 确认 `--audio` 指向有效 MP3；用户须自备音频（不内置 TTS） |
 | 改了 `mcp-server/` 代码不生效 | Node 缓存旧模块 | 重启 `agent-up.mjs` 重拉后端 |
 | 深链打开后脚本是乱码 | 双重编码（旧代码） | 已修复；用 `genlink` 生成链接，不要手拼 |
@@ -274,7 +284,7 @@ Gospel-infused funk, dual powerful black male lead vocals, raspy soulful vocal t
 - 自动开浏览器已用 `start ""` 处理；若失败会打印 URL 让你手动访问。
 - 本地静态音频服务注意端口可达（防火墙）。
 - 深链所有参数必须 `encodeURIComponent`（已用 `URLSearchParams` 自动处理，勿手拼）。
-- `run`/`run-page` 遇 `needs_review` 退出码为 2，属正常「等 LLM 干预」信号，不是失败（带 `--decisions` 可避免）。
+- `run`/`run-page` 遇 `needs_review` 退出码为 2，属正常「等 LLM 干预」信号，不是失败；`--decisions` 只负责贴纸，不能绕过此闸门，需按 `AI_HANDOFF_JSON` 产 fixes 再 `apply-fixes`。
 
 ---
 

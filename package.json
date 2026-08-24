@@ -8,7 +8,8 @@
     "build": "vite build",
     "preview": "vite preview",
     "agent:up": "node scripts/agent-up.mjs",
-    "agent:ensure": "node scripts/agent-bridge.mjs ensure"
+    "agent:ensure": "node scripts/agent-bridge.mjs ensure",
+    "test": "node --test"
   },
   "dependencies": {
     "@huggingface/transformers": "^3.8.1",

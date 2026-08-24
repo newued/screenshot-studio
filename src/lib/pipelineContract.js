@@ -62,9 +62,11 @@ export const UI_STATUS = {
 
 // 生产状态（agent / 后端运行时，原散落在 agent-bridge 的 running/aligned/...）
 // 任一步骤可能因上游变更而 STALE，需重新确认。
+// GENERATED 表示「产物已生成但用户/agent 尚未确认」（用于区分 TIMELINE 的 generated ≠ confirmed）。
 export const PROJECT_STATUS = {
   PENDING: 'PENDING',
   RUNNING: 'RUNNING',
+  GENERATED: 'GENERATED',
   WAITING_USER: 'WAITING_USER',
   WAITING_AGENT: 'WAITING_AGENT',
   VALIDATING: 'VALIDATING',

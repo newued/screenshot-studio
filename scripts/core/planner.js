@@ -49,7 +49,25 @@ export async function runProductionPlan({
     // 2) VOICEOVER：ASR + 节拍网格 + DP 对齐
     activeStep = 'VOICEOVER'
     patchState(statePath, { current_step: 'VOICEOVER', status: PROJECT_STATUS.RUNNING })
-    const align = await callTool('alignDP', { audioPath, scriptText, model: 'small', hopLength: 512 })
+    // 轻量自动恢复（反馈⑨）：对齐属外部依赖（ASR/Python），瞬时故障可重试一次，环境类故障不重试。
+    let align
+    let attempt = 0
+    const MAX_ATTEMPTS = 2
+    while (true) {
+      try {
+        align = await callTool('alignDP', { audioPath, scriptText, model: 'small', hopLength: 512 })
+        break
+      } catch (e) {
+        attempt++
+        const kind = classifyError(e)
+        if (kind === 'transient' && attempt < MAX_ATTEMPTS) {
+          log(`alignDP 瞬时失败(${kind})，第 ${attempt} 次重试...`)
+          patchState(statePath, { current_step: 'VOICEOVER', status: PROJECT_STATUS.RUNNING, recover_attempt: attempt })
+          continue
+        }
+        throw e
+      }
+    }
     patchState(statePath, {
       current_step: 'VOICEOVER',
       status: PROJECT_STATUS.SUCCEEDED,
@@ -57,8 +75,9 @@ export async function runProductionPlan({
       asr_quality_score: align.asr_quality_score,
       mapping_meta: align.mapping_meta,
       beat_grid_len: (align.beat_grid || []).length,
-      // TIMELINE 由 alignDP 的 mapping 产出（派生步），此处一并标记完成，消除步骤定义漂移
-      timeline_status: PROJECT_STATUS.SUCCEEDED,
+      // TIMELINE 由 alignDP 的 mapping 派生：此处仅标记「产物已生成」，不等同于「用户已确认」。
+      timeline_status: PROJECT_STATUS.GENERATED,
+      timeline_confirmed: false,
     })
     await persistArtifact(statePath, projectId, 'VOICEOVER', align)
 
@@ -91,7 +110,7 @@ export async function runProductionPlan({
 
     // 4) 跳过渲染（仅对齐）
     if (skipRender) {
-      patchState(statePath, { current_step: 'TIMELINE', status: PROJECT_STATUS.SUCCEEDED, align_result: align })
+      patchState(statePath, { current_step: 'TIMELINE', timeline_status: PROJECT_STATUS.GENERATED, timeline_confirmed: false, align_result: align })
       return { skipped: true, statePath }
     }
 
@@ -116,6 +135,14 @@ export async function runProductionPlan({
 export function cancelProductionPlan(statePath, step = null) {
   patchState(statePath, { current_step: step || 'RENDER', status: PROJECT_STATUS.CANCELLED, cancelled_at: new Date().toISOString() })
   return true
+}
+
+// 错误分类（反馈⑨：自动恢复依据）。仅 'transient' 可重试；'env' 为环境缺失（不重试）；其余 'unknown'。
+export function classifyError(e) {
+  const msg = (e && e.message) || String(e)
+  if (/timeout|timed out|ECONN|ETIMEDOUT|503|502|busy|rate.?limit|temporary/i.test(msg)) return 'transient'
+  if (/python|ffmpeg|not found|ENOENT|no such file|missing|dependency|module not found|could not find/i.test(msg)) return 'env'
+  return 'unknown'
 }
 
 // 把 messages 还原成脚本文本（供 run-page 缺少 scriptText 时复用）

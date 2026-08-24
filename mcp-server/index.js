@@ -20,6 +20,7 @@ import {
   readPipelineState,
   dispatchTool,
   listToolSpecs,
+  detectCapabilities,
 } from './registry.js'
 
 const PORT = parseInt(process.env.PORT || '9527', 10)
@@ -48,10 +49,17 @@ function startHttpServer() {
       return
     }
 
-    // 健康检查
+    // 健康检查（含能力探测：服务存活 ≠ 能力就绪）
     if (req.method === 'GET' && req.url === '/api/health') {
+      const caps = detectCapabilities()
+      const ready = caps.ffmpeg && caps.python
       res.writeHead(200, { 'Content-Type': 'application/json' })
-      res.end(JSON.stringify({ status: 'ok', tools: listToolSpecs().map((t) => t.name) }))
+      res.end(JSON.stringify({
+        status: ready ? 'ok' : 'degraded',
+        ready,
+        capabilities: caps,
+        tools: listToolSpecs().map((t) => t.name),
+      }))
       return
     }
 

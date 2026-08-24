@@ -21,8 +21,10 @@ export async function checkMcpStatus() {
   _checking = true
   try {
     const res = await fetch(`${MCP_BASE}/health`, { signal: AbortSignal.timeout(2000) })
-    const data = await res.json()
-    _connected = data.status === 'ok'
+    await res.json().catch(() => ({}))
+    // 连接状态只看「服务是否连通」：ok / degraded 都算在线（degraded 仅表示缺 ffmpeg/python 等依赖，
+    // 能力就绪情况由 capabilities 单独表达，不应误报成「MCP 离线」）。只有真正连不上（非 2xx / 抛错）才离线。
+    _connected = res.ok
   } catch {
     _connected = false
   }

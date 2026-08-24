@@ -2,6 +2,10 @@ import { defineConfig } from 'vite'
 import react from '@vitejs/plugin-react'
 
 export default defineConfig({
+  // 关掉清屏，避免文件变动触发 HMR 时反复清屏重绘导致终端闪烁
+  clearScreen: false,
+  // 只保留 warn/error，减少 dev server 噪音
+  logLevel: 'warn',
   plugins: [react()],
   server: {
     host: true,

@@ -1,5 +1,6 @@
 // 脚本编辑器：说话人选择 + 插入模板 + emoji 面板
 import React, { useRef, useState } from 'react'
+import { validateScript } from '../../lib/validateScript.js'
 
 const CHIPS = [
   { key: 'text', label: '文本', tpl: (s) => `${s}说：` },
@@ -63,6 +64,9 @@ export default function ScriptEditor({ value, onChange, members = [] }) {
     }
   }
 
+  // 实时校验脚本格式（与 parseScript 一致），提前暴露 [A]、说话人越界等错误
+  const v = validateScript(value, members)
+
   return (
     <div className="script-editor">
       <div className="script-toolbar">
@@ -101,6 +105,34 @@ export default function ScriptEditor({ value, onChange, members = [] }) {
         }}
         placeholder={'输入对话脚本，例如：\nA说：在吗？\nB说：在的\n时间：上午 9:41\nA说：[红包：恭喜发财]\nB说：[转账：88.00，转账给朋友]'}
       />
+      {v && (v.errors.length > 0 || v.warnings.length > 0) && (
+        <div className="ai-validate" style={{ marginTop: 8 }}>
+          {v.errors.length > 0 && (
+            <div className="ai-validate-block ai-err">
+              <div className="ai-validate-title">❌ {v.errors.length} 处格式错误（将不能被正确解析为对话气泡）</div>
+              <ul>
+                {v.errors.slice(0, 8).map((e, i) => (
+                  <li key={i}>第 {e.line} 行：{e.message}</li>
+                ))}
+                {v.errors.length > 8 && <li>…还有 {v.errors.length - 8} 处</li>}
+              </ul>
+            </div>
+          )}
+          {v.warnings.length > 0 && (
+            <div className="ai-validate-block">
+              <div className="ai-validate-title">⚠️ {v.warnings.length} 处提示</div>
+              <ul>
+                {v.warnings.slice(0, 5).map((w, i) => (
+                  <li key={i}>第 {w.line} 行：{w.message}</li>
+                ))}
+              </ul>
+            </div>
+          )}
+        </div>
+      )}
+      {v && v.errors.length === 0 && v.warnings.length === 0 && (value || '').trim() && (
+        <div className="ai-validate ai-validate-ok" style={{ marginTop: 8 }}>✓ 格式校验通过</div>
+      )}
     </div>
   )
 }

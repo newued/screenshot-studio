@@ -166,13 +166,8 @@ async function ensurePythonDeps() {
 }
 
 async function detectPython() {
-  const candidates = [
-    'C:\\Users\\Administrator\\AppData\\Local\\Programs\\Python\\Python312\\python.exe',
-    'C:\\Users\\Administrator\\AppData\\Local\\Programs\\Python\\Python311\\python.exe',
-    'C:\\Users\\Administrator\\AppData\\Local\\Programs\\Python\\Python310\\python.exe',
-    'python',
-    'python3'
-  ]
+  // 仅探测 PATH 中的解释器，不硬编码任何机器专属路径（跨平台通用）。
+  const candidates = ['python', 'python3', 'py']
   for (const py of candidates) {
     if (runQuiet(`${py} --version`).ok) return py
   }
@@ -243,8 +238,8 @@ async function main() {
     try {
       const res = await fetch('http://127.0.0.1:9527/api/health', { signal: AbortSignal.timeout(2000) })
       const data = await res.json()
-      return data.status === 'ok'
-    } catch { return false }
+      return data
+    } catch { return null }
   }
   async function viteHealth() {
     try {
@@ -262,11 +257,18 @@ async function main() {
   }
 
   if (ok) {
+    const health = await mcpHealth()
+    const caps = (health && health.capabilities) || {}
+    const cap = (b) => (b ? '✓' : '✗')
     console.log('\n┌────────────────────────────────────────┐')
-    console.log('│         🎉 全部就绪                     │')
+    console.log('│         🎉 服务已启动                    │')
     console.log('├────────────────────────────────────────┤')
     console.log('│ 网页: http://localhost:5173/           │')
     console.log('│ MCP : http://127.0.0.1:9527/api        │')
+    console.log('├────────────────────────────────────────┤')
+    console.log(`│ 能力: ffmpeg ${cap(caps.ffmpeg)}  python ${cap(caps.python)} │`)
+    console.log(`│ 视频生成: ${caps.render ? 'READY' : 'NOT_READY（缺 ffmpeg/python，仅图片导出可用）'} │`)
+    console.log(`│ ASR     : ${caps.asr ? 'READY' : 'NOT_READY'} │`)
     console.log('└────────────────────────────────────────┘')
     log('服务在后台运行，可继续调用 agent-bridge 命令')
   } else {

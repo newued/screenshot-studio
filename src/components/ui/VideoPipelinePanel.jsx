@@ -778,12 +778,27 @@ const BROWSER_ASR_MODEL = 'Xenova/whisper-small'
             className="btn btn-primary"
             onClick={handleConfirmPage}
             disabled={submitting || !localAudio}
+            title={!localAudio ? '请先上传配音 MP3 再确认' : ''}
           >
             {submitting ? '提交中…' : '确认页面信息'}
           </button>
         </div>
+        {!localAudio && !submitted && (
+          <p className="hint-text" style={{ color: '#b45309' }}>⚠️ 请先上传配音 MP3（本工具不内置 TTS），再点「确认页面信息」。</p>
+        )}
         {submitError && <p className="hint-text" style={{ color: '#b91c1c' }}>{submitError}</p>}
-        {submitted && <p className="hint-text" style={{ color: '#065f46' }}>✓ 已提交，AI 助手正在处理（音画同步 / 时间轴 / 动效 / 渲染）…</p>}
+        {submitted && (
+          <div className="pipeline-step-card" style={{ marginTop: 8 }}>
+            <div className="pipeline-step-name">提交状态</div>
+            <div className="pipeline-step-state">
+              {agentState?.output
+                ? '✅ 视频已生成，请在 AI 助手对话中获取文件路径'
+                : agentState?.page_confirmed
+                  ? '✅ 已提交，agent 已接收并正在处理（音画同步 / 时间轴 / 动效 / 渲染）…'
+                  : '⏳ 已提交，等待 AI 助手读取…（若长时间无响应，请确认 MCP 已连接）'}
+            </div>
+          </div>
+        )}
 
         {/* agent 进度回显（轮询 pipeline_state.json） */}
         {submitted && agentState && (

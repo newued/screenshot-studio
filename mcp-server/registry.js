@@ -9,6 +9,7 @@ import { readFile, writeFile, mkdir } from 'node:fs/promises'
 import { join, resolve, dirname } from 'node:path'
 import { fileURLToPath, pathToFileURL } from 'node:url'
 import { tmpdir } from 'node:os'
+import { detectCapabilities } from '../scripts/core/capabilities.js'
 import { transcribe, alignTimeline } from './tools/transcribe.js'
 import { extractBeatGrid, gridToUnits, snapToBeat } from './tools/beatGrid.js'
 import { renderFrame, renderAllFrames } from './tools/render.js'
@@ -185,8 +186,18 @@ const TOOLS = {
         asrQualityScore = round(coverage * 0.5 + wordCoverage * 0.5, 2)
         if (asrQualityScore >= 0.5) alignmentMode = 'asr_enhanced'
       } catch (err) {
-        console.error('[alignDP] ASR 失败，仅用节拍网格:', err.message)
-        rapUnits = gridToUnits(beat_grid, 4, duration).map(u => ({ text: '', start: u.start, end: u.end }))
+        console.error('[alignDP] ASR 不可用，退化为「脚本文本 + 节拍网格均匀切片」的语义均分兜底:', err.message)
+        // 用脚本各行文本 + 在节拍网格上均匀取段，构造 rap units；
+        // DP 将按文本相似度做 1:1 对齐（等价于语义均分），避免全部 unmatched 强制人工干预。
+        const nLines = lines.length
+        const denom = Math.max(1, nLines - 1)
+        rapUnits = lines.map((text, i) => {
+          const k0 = Math.round((i * (beat_grid.length - 1)) / denom)
+          const k1 = Math.round(((i + 1) * (beat_grid.length - 1)) / denom)
+          const start = beat_grid[k0]
+          const end = i < nLines - 1 ? beat_grid[k1] : duration
+          return { text, start, end }
+        })
         asrQualityScore = 0
         alignmentMode = 'beat_grid'
       }
@@ -200,6 +211,7 @@ const TOOLS = {
         mapping: dpResult.mapping, adlib_spans: dpResult.adlib_spans,
         mapping_meta: dpResult.mapping_meta, timeline,
         alignment_mode: alignmentMode, asr_quality_score: asrQualityScore, duration, asr_segments: asrSegments,
+        auto_fallback: asrSegments === null,
       }
     } finally {
       await cleanupTmpAudio(tmpAudioPath)
@@ -281,21 +293,33 @@ const TOOL_SCHEMAS = {
 // 任何状态相关工具被调用前，先按 pipeline_state.json 校验前置步骤是否完成。
 // 失败直接抛带码错误，agent 收到后自我纠正——系统不会执行越序操作。
 // 仅对「有前置依赖」的工具设防；无依赖工具（parseScript/getWorkflow/submitPage 等）默认放行。
+
+// 对齐是否完成：不依赖某个具体 step 的 _status 字段（planner 用扁平 status），
+// 而以「产物已生成」的多种信号判断，避免漏判导致合法渲染被误拦。
+function alignmentDone(st) {
+  return !!(
+    st.timeline_status === 'SUCCEEDED' ||
+    st.timeline_status === 'GENERATED' ||
+    st.align_result ||
+    st.mapping_meta ||
+    ['TIMELINE', 'SEMANTIC', 'RENDER'].includes(st.current_step)
+  )
+}
+
 function guardTool(name, state) {
   const st = state || {}
-  const done = (step) => st[`${step.toLowerCase()}_status`] === 'SUCCEEDED' || st.steps?.[step]?.status === 'SUCCEEDED'
   switch (name) {
     case 'render':
-      // 硬性前提：未对齐（VOICEOVER/时间轴未完成）绝不允许渲染。
+      // 硬性前提：未对齐（VOICEOVER/时间轴未生成）绝不允许渲染。
       // 语义步为建议性（可由 agent 经 applyCreative/aiApplyFix 增强），不作为渲染硬阻断，
       // 以免阻塞正常 run/apply-fixes 后出片路径。
-      if (!done('timeline') && !done('voiceover')) {
+      if (!alignmentDone(st)) {
         return { ok: false, code: 'RENDER_NOT_ALLOWED', message: 'VOICEOVER/时间轴未对齐完成，禁止渲染（请先 alignDP）' }
       }
       return { ok: true }
     case 'applyCreative':
     case 'aiApplyFix':
-      if (!done('timeline') && !done('voiceover')) {
+      if (!alignmentDone(st)) {
         return { ok: false, code: 'STEP_NOT_READY', message: 'VOICEOVER/时间轴未对齐完成，先运行对齐再写回创意/修正' }
       }
       return { ok: true }
@@ -330,6 +354,9 @@ function listToolSpecs() {
   }))
 }
 
+// 能力探测统一由 scripts/core/capabilities.js 提供（避免与 agent-bridge 重复实现）。
+// detectCapabilities 已从该模块导入并随下方 export 重新导出。
+
 export {
   TOOLS,
   TOOL_DESCRIPTIONS,
@@ -339,4 +366,5 @@ export {
   writePipelineState,
   dispatchTool,
   listToolSpecs,
+  detectCapabilities,
 }
