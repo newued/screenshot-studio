@@ -139,3 +139,17 @@
 - 修复①（`canvasChat.js`）：有贴纸时把白卡压到上方、预留固定「贴纸带」（屏高 42%，最小高度 500px），贴纸尺寸以带为准，与消息长度无关。
 - 现象②：某张 6KB 低分辨率贴纸（`怀疑人生.jpg`）显得极小。根因：`drawSticker` 曾 `scale = min(..., 1)` 禁止放大，小源图按原始像素绘制。
 - 修复②：去掉 `,1` 上限，contain 放大填满贴纸带。注意：源图分辨率低会被放大发虚，应替换为高清同名图（`dist/emojis/imgs/` 或 `public/emojis/imgs/`）。
+
+### 7.6 动效引擎：自研 Canvas-2D + `ctx.filter` 真滤镜（A1 选型）
+- 背景：动效一度是「50 种近似」，且自研引擎是否过重、是否该接开源库（Konva / WebGL）曾有争议。
+- 决策（A1）：保留自研轻量引擎 `src/lib/animations.js`（纯函数 `evalEffect` 算变换、`evalFilter` 算 `ctx.filter` 字符串），**不引入 Konva / WebGL**；用 `ctx.filter` 让 Skia 真出滤镜。理由：当前渲染走 Node + `@napi-rs/canvas` + ffmpeg 的**无浏览器通道**，`ctx.filter` 在 napi-canvas 里由 Skia 实际渲染（已验证模糊真实出图：黑块边缘像素均值 255→185）；Konva/WebGL 要么需切回浏览器、要么无 GPU 慢，收益不匹配当前架构。
+- 词表单一真相源 = `src/lib/effectsCatalog.js`（LLM 只引用其 `motion`/`sticker`/`transition` kind）；引擎实现 = `src/lib/animations.js`。**新增 kind 必须两处同时注册**，否则 LLM 引用的 kind 无对应实现。
+- 现状库存：
+  - 气泡动效 **61 种**：入场 19 / 出场 15 / 组合 10 / 循环 5 / 补充 7 / 真实滤镜 5。
+  - **真滤镜（ctx.filter 实出，非近似）8 种**：`blur_in`、`blur_out`、`glow`、`neon`、`invert`、`sepia`、`bloom`，以及 `glitch`（错位抖动上叠加真 `hue-rotate` 色偏）。
+  - **仍近似占位（transform 模拟裁剪/像素）7 种**：`cube` / `dissolve` / `ink_out` / `wipe_right` / `wipe_left` / `fan_expand` / `dissolve_out`，留待 C 轮做像素级 warp。
+  - 贴纸动画 6 种（pop/rotate/shake/fade/slide/zoom）；场景转场 5 种（fade/slide/zoom_blur/spin/glitch）；贴纸素材 10 种。
+- 左右区分（入场 / 出场都须考虑「自己的气泡 / 对方的气泡」）：
+  - 入场：`canvasChat.js` 的 `pickEntrance(msg,i,mine)` 按 `mine` 分流 `ENTER_POOL_RIGHT` / `ENTER_POOL_LEFT`（自己的从右滑入、对方的从左滑入）；`semantic.js` 感叹号区分 `A→shake` / `B→swing`。
+  - 出场：`DEFAULT_EXIT(p, mine, center)` 支持两种——`center=true` 朝屏心收（自己往左、对方往右），`center=false` 滑向各自一侧（自己往右、对方往左）。渲染层按消息索引 `it.i % 3 !== 0` 确定性混搭（约 2/3 中间收、1/3 各自侧），做到「有些中间收、有些滑向各自一侧」，而非千篇一律。
+- 防回归：引擎只产出变换/滤镜，渲染层（`canvasChat.js`）只 `applyTransform` + 设 `ctx.filter`（随 `save/restore` 复位，不影响标题栏与贴纸带）；不要在渲染层内联动效数学。

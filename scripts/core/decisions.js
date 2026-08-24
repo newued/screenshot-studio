@@ -5,14 +5,15 @@
 
 import { EFFECTS_CATALOG } from '../../src/lib/effectsCatalog.js'
 
-// 动效词表 kind → 渲染器入场枚举（canvasChat ENTER_SET 支持的值）
+// 动效词表 kind → 引擎 kind（animations.js 注册表）。旧别名映射到新引擎；
+// 新词表 kind（pulse/heartbeat/sway/wave/...）直接透传（EFFECT_MAP[effect]||effect）。
 const EFFECT_MAP = {
-  pop: 'pop_in',
+  pop: 'bounce_in',
   zoom: 'zoom_in',
-  shake: 'bounce_in',
-  flash: 'flip_in',
-  float: 'slide_in_top',
-  glitch: 'flip_in',
+  shake: 'shake',
+  flash: 'flicker',
+  float: 'float',
+  glitch: 'glitch',
   fade_in: 'fade_in',
   slide_in_left: 'slide_in_left',
   slide_in_right: 'slide_in_right',

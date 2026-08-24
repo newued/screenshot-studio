@@ -4,6 +4,7 @@
 // 纯逻辑 + Canvas 2D，无 DOM 依赖。
 import { avatarFor, genMemberAvatar, genMemberColor, avatarInitial } from './avatars.js'
 import { deriveChatTitle } from './chatTitle.js'
+import { evalEffect, applyTransform, hasEffect, evalFilter } from './animations.js'
 
 // 贴纸路径解析：库在 /emojis/imgs/ 下；message.sticker 可能带纯文件名、imgs/ 前缀或完整 /emojis 路径
 function resolveStickerUrl(file) {
@@ -85,50 +86,19 @@ function rng2(seed) {
   return () => { s ^= s << 13; s ^= s >>> 17; s ^= s << 5; s >>>= 0; return s / 4294967296 }
 }
 
-// 入场风格池（按说话人左右偏好分流）
-const ENTER_LEFT = ['slide_in_left', 'slide_in_top', 'pop_in', 'fade_in', 'zoom_in', 'flip_in', 'bounce_in']
-const ENTER_RIGHT = ['slide_in_right', 'slide_in_top', 'pop_in', 'fade_in', 'zoom_in', 'flip_in', 'bounce_in']
-const ENTER_SET = new Set([...ENTER_LEFT, 'slide_in_bottom'])
+// 入场风格池（按说话人左右偏好分流）；message.effect 已是引擎 kind 时直接采用
+const ENTER_POOL_RIGHT = ['slide_in_right', 'bounce_in', 'fade_in', 'pulse', 'zoom_in', 'spin_in', 'push_in', 'dynamic_zoom']
+const ENTER_POOL_LEFT = ['slide_in_left', 'bounce_in', 'fade_in', 'sway', 'zoom_in', 'spin_in', 'push_in', 'dynamic_zoom']
 function pickEntrance(msg, i, mine) {
   const e = msg.effect
-  if (e && ENTER_SET.has(e)) return e
+  if (e && hasEffect(e)) return e
   const r = rng2(hashStr('eff' + i))()
-  const pool = mine ? ENTER_RIGHT : ENTER_LEFT
+  const pool = mine ? ENTER_POOL_RIGHT : ENTER_POOL_LEFT
   return pool[Math.floor(r * pool.length)]
 }
 
-// 到位后的随机 idle 微动（增强画面丰富性）
-const IDLE_STYLES = ['float', 'breathe', 'wobble', 'bounce', 'none']
-function idleTransform(i, age) {
-  if (age < 0) age = 0
-  const style = IDLE_STYLES[hashStr('idle' + i) % IDLE_STYLES.length]
-  const ph = (hashStr('ph' + i) % 1000) / 1000 * Math.PI * 2
-  switch (style) {
-    case 'float': return { dx: 0, dy: 3 * Math.sin(age * 1.6 + ph), scale: 1, rotate: 0 }
-    case 'breathe': return { dx: 0, dy: 0, scale: 1 + 0.02 * Math.sin(age * 1.2 + ph), rotate: 0 }
-    case 'wobble': return { dx: 1.5 * Math.sin(age * 2 + ph), dy: 0, scale: 1, rotate: 1.2 * Math.sin(age * 1.5 + ph) }
-    case 'bounce': return { dx: 0, dy: -2 * Math.abs(Math.sin(age * 2 + ph)), scale: 1, rotate: 0 }
-    default: return { dx: 0, dy: 0, scale: 1, rotate: 0 }
-  }
-}
-
-// 入场动画进度：返回 { alpha, dx, dy, scale, rotate }
-// p = (t - ds) / 0.4，clamp 0..1；转场淡化由外部 alpha 处理
-function entranceProgress(effect, p) {
-  const q = clamp01(p)
-  switch (effect) {
-    case 'pop_in': return { alpha: 1, dx: 0, dy: 0, scale: easeOutBack(q), rotate: 0 }
-    case 'bounce_in': return { alpha: 1, dx: 0, dy: 0, scale: easeOutBack(q, 2.4), rotate: 0 }
-    case 'slide_in_left': return { alpha: 1, dx: -120 * (1 - q), dy: 0, scale: 1, rotate: 0 }
-    case 'slide_in_right': return { alpha: 1, dx: 120 * (1 - q), dy: 0, scale: 1, rotate: 0 }
-    case 'slide_in_top': return { alpha: 1, dx: 0, dy: -120 * (1 - q), scale: 1, rotate: 0 }
-    case 'slide_in_bottom': return { alpha: 1, dx: 0, dy: 120 * (1 - q), scale: 1, rotate: 0 }
-    case 'zoom_in': return { alpha: clamp01(q * 1.5), dx: 0, dy: 0, scale: 0.7 + 0.3 * easeOutBack(q), rotate: 0 }
-    case 'flip_in': return { alpha: clamp01(q * 1.5), dx: 0, dy: 0, scale: 0.9 + 0.1 * q, rotate: (1 - q) * 40 }
-    case 'fade_in':
-    default: return { alpha: q, dx: 0, dy: 0, scale: 1, rotate: 0 }
-  }
-}
+// 注：入场/循环/离场动画统一由 animations.js 引擎计算（evalEffect），
+// 不再在此内联；气泡组只调用 applyTransform 应用引擎返回的变换。
 
 // 贴纸动画进度：返回 { alpha, dx, dy, scale, rotate }
 function stickerProgress(anim, p, side) {
@@ -534,6 +504,38 @@ function drawSticker(ctx, file, x, y, maxW, maxH, anim, side, progress) {
   ctx.restore()
 }
 
+// ---------- 场景切换叠加层（B：转场） ----------
+// 在场景（说话人）切换时于整帧之上叠加一次性效果：flash 白闪 / sweep 扫光 / glitch 错位。
+function drawTransitionOverlay(ctx, kind, p, w, h) {
+  if (kind === 'flash') {
+    ctx.save()
+    ctx.globalAlpha = (1 - p) * 0.6
+    ctx.fillStyle = '#ffffff'
+    ctx.fillRect(0, 0, w, h)
+    ctx.restore()
+  } else if (kind === 'sweep') {
+    const cx = -w + 2 * w * p
+    ctx.save()
+    const grad = ctx.createLinearGradient(cx - 160, 0, cx + 160, h)
+    grad.addColorStop(0, 'rgba(255,255,255,0)')
+    grad.addColorStop(0.5, 'rgba(255,255,255,0.45)')
+    grad.addColorStop(1, 'rgba(255,255,255,0)')
+    ctx.fillStyle = grad
+    ctx.fillRect(0, 0, w, h)
+    ctx.restore()
+  } else if (kind === 'glitch') {
+    ctx.save()
+    const slices = 7
+    for (let i = 0; i < slices; i++) {
+      const sy = Math.floor((h * i) / slices)
+      const sh = Math.ceil(h / slices) + 1
+      const off = Math.round(Math.sin((p + i) * 9) * 22 * (1 - p))
+      try { ctx.drawImage(ctx.canvas, 0, sy, w, sh, off, sy, w, sh) } catch { /* 不支持自我 drawImage 时跳过 */ }
+    }
+    ctx.restore()
+  }
+}
+
 // ---------- 主渲染器 ----------
 // 返回 { render(t) → canvas, invalidate() }；数据变化时调用 invalidate 重算布局
 export function createChatFrameRenderer({
@@ -590,6 +592,12 @@ export function createChatFrameRenderer({
 
   let layout = null // 缓存：布局 { items: [{msg, x, y, w, h, lines, mine, hasName, timing}], title }
   let cacheKey = ''
+  // 场景切换状态（B：转场叠加层）：lastSpeaker 记录上一帧说话人，transStart 记录本次切换时刻
+  let lastSpeaker = null
+  let sceneIdx = 0
+  let transStart = -1
+  const TRANS_DUR = 0.35
+  const TRANS_CYCLE = ['flash', 'sweep', 'glitch']
 
   function computeLayout(messages, members, platform, showName, centered) {
     const items = []
@@ -721,9 +729,12 @@ export function createChatFrameRenderer({
     // ---- 单条依次登上舞台：任意时刻只显示当前时间窗命中的那一条消息，
     //      下一条到来时上一条立即离场，不堆叠累积；白卡=舞台全宽（像单条截图）。 ----
     const items2 = layout.items
+    // 每条消息的「活跃窗口」向后延长 EXIT_PAD，使其离场动效（exit）能在下一条登场前播完
+    const EXIT_PAD = 0.35
     let activeIdx = items2.findIndex((it) => {
       const tt = timingArr[it.i]
-      return t >= tt.ds && (t < tt.de || (it.i === items2.length - 1 && Math.abs(t - tt.de) < 0.05))
+      const end = it.i === items2.length - 1 ? tt.de : tt.de + EXIT_PAD
+      return t >= tt.ds && (t < end || (it.i === items2.length - 1 && Math.abs(t - tt.de) < 0.05))
     })
     if (activeIdx === -1) {
       // 落在两窗之间的空档：静态保留最近一条（不再淡出留黑屏），下一条登场时无缝顶替
@@ -734,17 +745,19 @@ export function createChatFrameRenderer({
     const it = items2[activeIdx]
     const info = timingArr[activeIdx]
     const mine = it.mine
+    // 场景切换检测（B：转场叠加层用），按说话人变化触发
+    const sp = it.msg.speaker
+    if (lastSpeaker !== null && sp != null && sp !== lastSpeaker) { sceneIdx++; transStart = t }
+    if (sp != null) lastSpeaker = sp
+
     const eff = pickEntrance(it.msg, it.i, mine)
-    const appearP = clamp01((t - info.ds) / 0.4)
-    const ap = entranceProgress(eff, appearP)
-    // 入场渐显（不带 idle 抖动：到位后完全静止）
-    const alpha = eff === 'fade_in' || it.msg.effect === 'fade_in' ? appearP : clamp01(appearP * 1.5)
-    // 离场：仅当下一条已经登场（t 超过本窗 de）才整组淡出，避免空档黑屏
-    const exitP = t > info.de ? clamp01((t - info.de) / 0.35) : 0
-    const exitAlpha = clamp01(1 - exitP * 1.6)
-    const exitShift = exitP > 0 ? (mine ? -110 : 110) * exitP : 0
-    const exitScale = 1 - exitP * 0.14
-    const finalAlpha = alpha * exitAlpha
+    // 退场方向混搭：多数「向中间收」，少数「滑向各自一侧」（按消息索引确定性选择）
+    const exitCenter = it.i % 3 !== 0
+    // 入场/循环/离场统一由引擎计算（含 default 柔和淡入与默认方向淡出）
+    const tr = evalEffect(eff, t, { ds: info.ds, de: info.de }, { enterDur: 0.4, exitDur: 0.35, mine, exitCenter })
+    const flt = evalFilter(eff, t, { ds: info.ds, de: info.de }, { enterDur: 0.4, exitDur: 0.35, mine })
+    const appearP = clamp01((t - info.ds) / 0.4) // 贴纸淡入淡出仍复用
+    const finalAlpha = tr.alpha
 
     if (finalAlpha > 0.01) {
       // 白卡：舞台全宽（像直接截了整条聊天的图），垂直包裹当前消息整块
@@ -761,14 +774,11 @@ export function createChatFrameRenderer({
       const cardY = Math.round(TITLE_H + Math.max(24, (topRegionH - TITLE_H - cardH) / 2))
       ctx.save()
       ctx.globalAlpha = finalAlpha
-      // 整组（白卡 + 气泡 + 头像）一起做入场/出场动效：位移 + 缩放 + 旋转，绕白卡中心
-      ctx.translate(ap.dx + exitShift, ap.dy)
-      const gcx = cardX + cardW / 2
-      const gcy = cardY + cardH / 2
-      ctx.translate(gcx, gcy)
-      ctx.scale(ap.scale * exitScale, ap.scale * exitScale)
-      if (ap.rotate) ctx.rotate((ap.rotate * Math.PI) / 180)
-      ctx.translate(-gcx, -gcy)
+      // 真实滤镜（A1）：模糊/辉光/霓虹/负片/老照片/高光/故障色偏作用于整组气泡；
+      // 设在这里、随 ctx.restore() 自动复位，不影响标题栏与贴纸带。
+      ctx.filter = flt || 'none'
+      // 整组（白卡 + 气泡 + 头像）应用引擎变换：位移/缩放/旋转/错切，绕白卡中心
+      applyTransform(ctx, tr, cardX + cardW / 2, cardY + cardH / 2)
       ctx.fillStyle = '#f5f5f5'
       ctx.fillRect(cardX, cardY, cardW, cardH)
       // 消息块在白卡内垂直居中（白卡内 padding）
@@ -795,6 +805,15 @@ export function createChatFrameRenderer({
           drawSticker(ctx, it.msg.sticker, sx, sy, stickerW, stickerH, emotionToAnim(it.msg.emotion), 'right', appearP)
           ctx.restore()
         }
+      }
+    }
+
+    // ---- B：场景切换叠加层（转场：闪光/扫光/故障） ----
+    if (transStart >= 0) {
+      const dt = t - transStart
+      if (dt >= 0 && dt < TRANS_DUR) {
+        const kind = (it && it.msg.transition) || TRANS_CYCLE[sceneIdx % TRANS_CYCLE.length]
+        try { drawTransitionOverlay(ctx, kind, dt / TRANS_DUR, width, height) } catch { /* 忽略叠加层异常，不影响主画面 */ }
       }
     }
 

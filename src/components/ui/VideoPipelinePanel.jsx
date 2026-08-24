@@ -515,7 +515,7 @@ const BROWSER_ASR_MODEL = 'Xenova/whisper-small'
       messages: mergedMessages, members, platform, mode,
       title: headerTitle, timing,
     })
-  }, [mergedMessages, members, platform, mode, headerTitle, timing, getChatRenderer])
+  }, [mergedMessages, members, platform, mode, headerTitle, timeline, getChatRenderer])
 
   // ==================== 导出 ====================
   const exportMp4 = useCallback(async () => {

@@ -30,7 +30,7 @@ const QUESTION_WORDS = ['？', '?', '吗', '呢', '什么', '怎么', '为啥', 
 const EXCLAIM_RE = /[！!]/
 
 // 相邻不重复时的轮换池（参考 pick_animation 的 [渐显, 侧滑, 弹入] 轮换）
-const EFFECT_ROTATION = ['fade_in', 'slide_in_right', 'slide_in_left', 'pop_in']
+const EFFECT_ROTATION = ['fade_in', 'slide_in_right', 'slide_in_left', 'bounce_in', 'pulse', 'sway', 'zoom_in', 'spin_in', 'blur_in', 'glow', 'bloom', 'neon']
 
 // public/emojis 下的中文名贴纸清单（内容词匹配用；基础表情 angry_01 等由情绪映射覆盖）
 const STICKER_FILES = [
@@ -121,10 +121,10 @@ export function decideSemantics(messages = []) {
     if (emotion !== 'neutral') sticker = STICKER_EMOTION_MAP[emotion]
     if (!sticker) sticker = matchStickerByContent(text)
 
-    // effect：疑问 → pop_in；感叹 → A 向右滑动 / B 向左滑动；否则 fade_in；相邻不重复轮换
+    // effect：疑问 → spin_in（旋转入场）；感叹 → A 抖动 / B 荡秋千；否则从轮换池取，相邻不重复
     let effect = 'fade_in'
-    if (QUESTION_WORDS.some((w) => text.includes(w))) effect = 'pop_in'
-    else if (EXCLAIM_RE.test(text)) effect = m.speaker === 'B' ? 'slide_in_left' : 'slide_in_right'
+    if (QUESTION_WORDS.some((w) => text.includes(w))) effect = 'spin_in'
+    else if (EXCLAIM_RE.test(text)) effect = m.speaker === 'B' ? 'swing' : 'shake'
     if (effect === lastEffect) {
       const pool = EFFECT_ROTATION.filter((e) => e !== effect)
       effect = pool[(i + 1) % pool.length]
