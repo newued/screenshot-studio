@@ -8,14 +8,15 @@
  *
  * 输出格式对应 voiceover.json 的 beat_grid / grid_meta 部分。
  */
-import { execFile } from 'node:child_process'
-import { writeFile, readFile, unlink, mkdtemp } from 'node:fs/promises'
-import { join } from 'node:path'
-import { tmpdir } from 'node:os'
-import { promisify } from 'node:util'
-import { requirePython } from './pyEnv.js'
+import { execFile } from "node:child_process";
+import { writeFile, readFile, unlink, mkdtemp } from "node:fs/promises";
+import { join } from "node:path";
+import { tmpdir } from "node:os";
+import { promisify } from "node:util";
+import { requirePython } from "./pyEnv.js";
+import { normalizeAudio } from "./audio.js";
 
-const execFileAsync = promisify(execFile)
+const execFileAsync = promisify(execFile);
 
 /**
  * 提取音频节拍网格
@@ -30,18 +31,16 @@ const execFileAsync = promisify(execFile)
  * }}
  */
 export async function extractBeatGrid(audioPath, opts = {}) {
-  const {
-    hopLength = 512,
-    onProgress,
-  } = opts
+  const { hopLength = 512, onProgress } = opts;
 
   if (!audioPath) {
-    throw new Error('extractBeatGrid 需要 audioPath（音频文件绝对路径）')
+    throw new Error("extractBeatGrid 需要 audioPath（音频文件绝对路径）");
   }
 
-  const tmpDir = await mkdtemp(join(tmpdir(), 'screenshort-beat-'))
-  const scriptPath = join(tmpDir, 'beatgrid.py')
-  const outputPath = join(tmpDir, 'result.json')
+  const normalized = await normalizeAudio(audioPath);
+  const tmpDir = await mkdtemp(join(tmpdir(), "screenshort-beat-"));
+  const scriptPath = join(tmpDir, "beatgrid.py");
+  const outputPath = join(tmpDir, "result.json");
 
   // Python 脚本：librosa 节拍提取 + onset 包络 + 结构分段
   const pyScript = `
@@ -49,7 +48,7 @@ import json, sys, os
 import librosa
 import numpy as np
 
-audio_path = r"${audioPath.replace(/\\/g, '\\\\')}"
+audio_path = r"${normalized.path.replace(/\\/g, "\\\\")}"
 hop_length = ${hopLength}
 
 # 加载音频：先用 ffmpeg 转 WAV，规避 MP3 VBR 头声明时长错误
@@ -160,29 +159,34 @@ result = {
     "duration": round(duration, 3),
 }
 
-with open(r"${outputPath.replace(/\\/g, '\\\\')}", "w", encoding="utf-8") as f:
+with open(r"${outputPath.replace(/\\/g, "\\\\")}", "w", encoding="utf-8") as f:
     json.dump(result, f, ensure_ascii=False)
 print("OK")
-`
+`;
 
-  await writeFile(scriptPath, pyScript, 'utf-8')
-  onProgress?.('启动 librosa 节拍提取…')
+  await writeFile(scriptPath, pyScript, "utf-8");
+  onProgress?.("启动 librosa 节拍提取…");
 
-  const py = await requirePython('librosa')
+  const py = await requirePython("librosa");
   try {
-    await execFileAsync(py, [scriptPath], { timeout: 120_000 })
+    await execFileAsync(py, [scriptPath], { timeout: 120_000 });
   } catch (err) {
-    throw new Error(`librosa 节拍提取失败: ${err.message}`)
+    throw new Error(`librosa 节拍提取失败: ${err.message}`);
   } finally {
-    unlink(scriptPath).catch(() => {})
+    unlink(scriptPath).catch(() => {});
+    await normalized.cleanup();
   }
 
-  const raw = JSON.parse(await readFile(outputPath, 'utf-8'))
-  unlink(outputPath).catch(() => {})
+  const raw = JSON.parse(await readFile(outputPath, "utf-8"));
+  unlink(outputPath).catch(() => {});
   // 清理临时目录
-  try { await import('node:fs').then(fs => fs.rmdirSync(tmpDir)) } catch { /* */ }
+  try {
+    await import("node:fs").then((fs) => fs.rmdirSync(tmpDir));
+  } catch {
+    /* */
+  }
 
-  return raw
+  return raw;
 }
 
 /**
@@ -192,17 +196,17 @@ print("OK")
  * @returns {number} 吸附后的时间
  */
 export function snapToBeat(time, beatGrid) {
-  if (!beatGrid || beatGrid.length === 0) return time
-  let best = beatGrid[0]
-  let bestDist = Math.abs(time - best)
+  if (!beatGrid || beatGrid.length === 0) return time;
+  let best = beatGrid[0];
+  let bestDist = Math.abs(time - best);
   for (const t of beatGrid) {
-    const d = Math.abs(time - t)
+    const d = Math.abs(time - t);
     if (d < bestDist) {
-      bestDist = d
-      best = t
+      bestDist = d;
+      best = t;
     }
   }
-  return best
+  return best;
 }
 
 /**
@@ -215,28 +219,29 @@ export function snapToBeat(time, beatGrid) {
  * @returns {Array<{ start: number, end: number, beat_index: number }>}
  */
 export function gridToUnits(beatGrid, beatsPerUnit = 4, duration = 0) {
-  if (!beatGrid || beatGrid.length === 0) return []
-  const units = []
+  if (!beatGrid || beatGrid.length === 0) return [];
+  const units = [];
   for (let i = 0; i < beatGrid.length; i += beatsPerUnit) {
-    const start = beatGrid[i]
-    const endIdx = Math.min(i + beatsPerUnit, beatGrid.length - 1)
-    const end = i + beatsPerUnit < beatGrid.length
-      ? beatGrid[i + beatsPerUnit]
-      : (duration || beatGrid[beatGrid.length - 1])
+    const start = beatGrid[i];
+    const endIdx = Math.min(i + beatsPerUnit, beatGrid.length - 1);
+    const end =
+      i + beatsPerUnit < beatGrid.length
+        ? beatGrid[i + beatsPerUnit]
+        : duration || beatGrid[beatGrid.length - 1];
     units.push({
       start: round(start),
       end: round(end),
       beat_index: i,
-    })
+    });
   }
   // 确保最后一个单元延伸到音频末尾
   if (units.length > 0 && duration > 0) {
-    units[units.length - 1].end = round(duration)
+    units[units.length - 1].end = round(duration);
   }
-  return units
+  return units;
 }
 
 function round(n, d = 4) {
-  const p = Math.pow(10, d)
-  return Math.round(n * p) / p
+  const p = Math.pow(10, d);
+  return Math.round(n * p) / p;
 }

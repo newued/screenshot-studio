@@ -2,12 +2,14 @@
  * export.js — ffmpeg 编码（RGBA 帧序列 → MP4）
  * 复用 render-video.mjs 的 ffmpeg 管道逻辑。
  */
-import { execFile } from 'node:child_process'
-import { promisify } from 'node:util'
-import { readdir } from 'node:fs/promises'
-import { join } from 'node:path'
+import { execFile } from "node:child_process";
+import { promisify } from "node:util";
+import { ensureFfmpegPath } from "./pyEnv.js";
+ensureFfmpegPath();
+import { readdir } from "node:fs/promises";
+import { join } from "node:path";
 
-const execFileAsync = promisify(execFile)
+const execFileAsync = promisify(execFile);
 
 /**
  * RGBA 帧序列 + 音频 → MP4
@@ -18,36 +20,50 @@ const execFileAsync = promisify(execFile)
  * @param {string} outputPath - 输出 MP4 路径
  * @param {object} opts - { fps:30, width:1080, height:1920, onProgress }
  */
-export async function encodeMP4(framesDir, frameCount, duration, audioPath, outputPath, opts = {}) {
-  const { fps = 30, width = 1080, height = 1920, onProgress } = opts
+export async function encodeMP4(
+  framesDir,
+  frameCount,
+  duration,
+  audioPath,
+  outputPath,
+  opts = {},
+) {
+  const { fps = 30, width = 1080, height = 1920, onProgress } = opts;
 
   // 构建 ffmpeg 命令
   const args = [
-    '-y',
-    '-f', 'rawvideo',
-    '-pix_fmt', 'rgba',
-    '-s', `${width}x${height}`,
-    '-r', String(fps),
-    '-i', join(framesDir, '%06d.rgba'),
-  ]
+    "-y",
+    "-f",
+    "rawvideo",
+    "-pix_fmt",
+    "rgba",
+    "-s",
+    `${width}x${height}`,
+    "-r",
+    String(fps),
+    "-i",
+    join(framesDir, "%06d.rgba"),
+  ];
 
   if (audioPath) {
-    args.push('-i', audioPath)
-    args.push('-c:a', 'aac', '-b:a', '128k')
+    args.push("-i", audioPath);
+    args.push("-c:a", "aac", "-b:a", "128k");
   }
 
-  args.push('-c:v', 'libx264', '-pix_fmt', 'yuv420p', '-b:v', '4M')
-  args.push('-movflags', '+faststart')
-  args.push('-shortest')
-  args.push(outputPath)
+  args.push("-c:v", "libx264", "-pix_fmt", "yuv420p", "-b:v", "4M");
+  args.push("-movflags", "+faststart");
+  args.push("-shortest");
+  args.push(outputPath);
 
-  onProgress?.({ status: 'encoding', frameCount, duration })
+  onProgress?.({ status: "encoding", frameCount, duration });
 
   try {
-    const { stdout, stderr } = await execFileAsync('ffmpeg', args, { timeout: 300_000 })
-    return { success: true, outputPath, frameCount, duration }
+    const { stdout, stderr } = await execFileAsync("ffmpeg", args, {
+      timeout: 300_000,
+    });
+    return { success: true, outputPath, frameCount, duration };
   } catch (err) {
-    throw new Error(`ffmpeg 编码失败: ${err.message}`)
+    throw new Error(`ffmpeg 编码失败: ${err.message}`);
   }
 }
 
@@ -56,12 +72,12 @@ export async function encodeMP4(framesDir, frameCount, duration, audioPath, outp
  */
 export async function cleanupFrames(framesDir) {
   try {
-    const { readdirSync, unlinkSync, rmdirSync } = await import('node:fs')
-    const files = readdirSync(framesDir)
+    const { readdirSync, unlinkSync, rmdirSync } = await import("node:fs");
+    const files = readdirSync(framesDir);
     for (const f of files) {
-      unlinkSync(join(framesDir, f))
+      unlinkSync(join(framesDir, f));
     }
-    rmdirSync(framesDir)
+    rmdirSync(framesDir);
   } catch {
     // 忽略清理错误
   }

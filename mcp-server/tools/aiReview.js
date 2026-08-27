@@ -12,10 +12,15 @@
 // 节拍锚点」归位，比逐字匹配可靠。
 
 function parseScriptLines(scriptText) {
-  return (scriptText || '')
-    .split('\n')
-    .map((l) => l.replace(/^[AB]说[：:]\s*/, '').replace(/^\[.+\]\s*/, '').trim())
-    .filter(Boolean)
+  return (scriptText || "")
+    .split("\n")
+    .map((l) =>
+      l
+        .replace(/^[AB]说[：:]\s*/, "")
+        .replace(/^\[.+\]\s*/, "")
+        .trim(),
+    )
+    .filter(Boolean);
 }
 
 // 提取待仲裁条目（DP 自动对齐后 needs_review 的部分）
@@ -24,40 +29,49 @@ function pickReviewItems(mapping) {
     .map((m, i) => ({ _index: i, ...m }))
     .filter(
       (m) =>
-        m.match_type === 'unmatched' ||
+        m.match_type === "unmatched" ||
         m.ambiguous ||
-        (m.calibrated_confidence ?? 1) < 0.5
-    )
+        (m.calibrated_confidence ?? 1) < 0.5,
+    );
 }
 
 /**
  * 交接包：供主 agent 读取并做语义对齐（不调 LLM）
  * @returns {Promise<{available:boolean, needs_total:number, reviewItems:Array, context:object, prompt:string}>}
  */
-export async function aiReview({ scriptText, beatGrid, rawSegments, mapping }) {
-  const scriptLines = parseScriptLines(scriptText)
-  const reviewItems = pickReviewItems(mapping)
+export async function aiReview({
+  scriptText,
+  beatGrid,
+  rawSegments,
+  mapping,
+  asrStatus,
+  asrError,
+}) {
+  const scriptLines = parseScriptLines(scriptText);
+  const reviewItems = pickReviewItems(mapping);
 
   // 结构化上下文（agent 据此推理，无需再调外部模型）
   const context = {
+    asr_status: asrStatus || "unknown",
+    asr_error: asrError || "",
     beat_grid: (beatGrid || []).map((b) => +(+b).toFixed(3)),
     script_lines: scriptLines.map((t, i) => ({ message_id: i, text: t })),
     raw_segments: (rawSegments || []).map((s) => ({
       start: s.start,
       end: s.end,
-      text: (s.text || '').trim(),
+      text: (s.text || "").trim(),
     })),
-  }
+  };
 
   // 给 agent 的指令（agent 用自己的 LLM 能力执行）
   const prompt =
-    '你是音视频字幕/歌词对齐专家。输入音频可能是说唱/演唱，ASR 转写已严重漂移，不能逐字匹配。\n' +
-    '请基于【语义】把每条待仲裁台词归位到节拍网格时间轴上：\n' +
-    '1) 严格保持脚本原始顺序（message_id 升序）；\n' +
-    '2) 每条 start/end 落在相邻拍点之间，start 对齐或略早于某拍，end 不超过下一条 start；\n' +
-    '3) 若确实无法定位（纯 adlib/哼唱），match_type 标 unmatched 并给 proposed_at 取最近拍；\n' +
+    "你是音视频字幕/歌词对齐专家。输入音频可能是说唱/演唱，ASR 转写已严重漂移，不能逐字匹配。\n" +
+    "请基于【语义】把每条待仲裁台词归位到节拍网格时间轴上：\n" +
+    "1) 严格保持脚本原始顺序（message_id 升序）；\n" +
+    "2) 每条 start/end 落在相邻拍点之间，start 对齐或略早于某拍，end 不超过下一条 start；\n" +
+    "3) 若确实无法定位（纯 adlib/哼唱），match_type 标 unmatched 并给 proposed_at 取最近拍；\n" +
     '4) 输出 JSON：{ "fixes": [ { "index":<原mapping索引>, "message_id":<n>, "start":<秒>, "end":<秒>, ' +
-    '"match_type":"exact|paraphrase|partial|adlib|unmatched", "calibrated_confidence":<0-1>, "note":"<理由>" } ] }'
+    '"match_type":"exact|paraphrase|partial|adlib|unmatched", "calibrated_confidence":<0-1>, "note":"<理由>" } ] }';
 
   return {
     available: true,
@@ -73,7 +87,7 @@ export async function aiReview({ scriptText, beatGrid, rawSegments, mapping }) {
     })),
     context,
     prompt,
-  }
+  };
 }
 
 /**
@@ -85,46 +99,59 @@ export async function aiReview({ scriptText, beatGrid, rawSegments, mapping }) {
  * @returns {Promise<{mapping:Array, mapping_meta:object, applied:number}>}
  */
 export async function aiApplyFix({ mapping, fixes, beatGrid }) {
-  const beats = (beatGrid || []).map((b) => +b).sort((a, b) => a - b)
+  const beats = (beatGrid || []).map((b) => +b).sort((a, b) => a - b);
   const snap = (t) => {
-    if (!beats.length || t == null) return t
-    let best = beats[0]
-    let bd = Math.abs(t - best)
+    if (!beats.length || t == null) return t;
+    let best = beats[0];
+    let bd = Math.abs(t - best);
     for (const b of beats) {
-      const d = Math.abs(t - b)
-      if (d < bd) { bd = d; best = b }
+      const d = Math.abs(t - b);
+      if (d < bd) {
+        bd = d;
+        best = b;
+      }
     }
-    return +best.toFixed(3)
-  }
+    return +best.toFixed(3);
+  };
 
-  const fixMap = new Map()
+  const fixMap = new Map();
   for (const f of fixes || []) {
-    if (f && f.index != null) fixMap.set(Number(f.index), f)
+    if (f && f.index != null) fixMap.set(Number(f.index), f);
   }
 
   const newMapping = (mapping || []).map((m, i) => {
-    const f = fixMap.get(i)
-    if (!f) return m
-    const start = f.start != null ? snap(f.start) : (m.rap_span?.start ?? m.proposed_at ?? null)
-    const end = f.end != null ? snap(f.end) : (m.rap_span?.end ?? m.proposed_at ?? null)
+    const f = fixMap.get(i);
+    if (!f) return m;
+    const start =
+      f.start != null
+        ? snap(f.start)
+        : (m.rap_span?.start ?? m.proposed_at ?? null);
+    const end =
+      f.end != null ? snap(f.end) : (m.rap_span?.end ?? m.proposed_at ?? null);
     return {
       ...m,
-      rap_span: start != null && end != null ? { start, end } : m.rap_span || null,
-      proposed_at: start != null ? start : m.proposed_at ?? null,
-      match_type: f.match_type || m.match_type || 'paraphrase',
-      calibrated_confidence: f.calibrated_confidence != null ? +f.calibrated_confidence : (m.calibrated_confidence ?? 0.6),
+      rap_span:
+        start != null && end != null ? { start, end } : m.rap_span || null,
+      proposed_at: start != null ? start : (m.proposed_at ?? null),
+      match_type: f.match_type || m.match_type || "paraphrase",
+      calibrated_confidence:
+        f.calibrated_confidence != null
+          ? +f.calibrated_confidence
+          : (m.calibrated_confidence ?? 0.6),
       ambiguous: false,
       ai_reviewed: true,
-      review_note: f.note || m.review_note || '',
-    }
-  })
+      review_note: f.note || m.review_note || "",
+    };
+  });
 
   // 重算 mapping_meta
-  const total = newMapping.length
-  const matched = newMapping.filter((m) => m.match_type && m.match_type !== 'unmatched').length
-  const unmatched = total - matched
-  const ambiguous = newMapping.filter((m) => m.ambiguous).length
-  const needs_review = unmatched > 0 || ambiguous > 0
+  const total = newMapping.length;
+  const matched = newMapping.filter(
+    (m) => m.match_type && m.match_type !== "unmatched",
+  ).length;
+  const unmatched = total - matched;
+  const ambiguous = newMapping.filter((m) => m.ambiguous).length;
+  const needs_review = unmatched > 0 || ambiguous > 0;
 
   return {
     mapping: newMapping,
@@ -138,7 +165,7 @@ export async function aiApplyFix({ mapping, fixes, beatGrid }) {
       ai_reviewed: true,
     },
     applied: fixMap.size,
-  }
+  };
 }
 
-export { parseScriptLines, pickReviewItems }
+export { parseScriptLines, pickReviewItems };
