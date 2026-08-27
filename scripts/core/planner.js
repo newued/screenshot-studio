@@ -8,7 +8,7 @@
 //     每步产物落盘为不可变 artifact（反馈⑦），needs_review 时交还 AI 交接包。
 
 import { callTool } from "./client.js";
-import { patchState, persistArtifact } from "./state.js";
+import { patchState, persistArtifact, readState } from "./state.js";
 import {
   PROJECT_STATUS,
   buildProductionPlan,
@@ -37,75 +37,95 @@ export async function runProductionPlan({
   groupName = "",
   out,
   skipRender = false,
+  allowApproximate = false,
 }) {
   if (!audioPath) throw new Error("runProductionPlan 需要 audioPath");
   if (!scriptText) throw new Error("runProductionPlan 需要 scriptText");
 
   let activeStep = "SCRIPT";
   try {
+    const saved = readState(statePath);
+    const canResume =
+      saved?.project_id === projectId &&
+      saved?.script_text === scriptText &&
+      saved?.audio_path === audioPath &&
+      Array.isArray(saved?.script_messages) &&
+      saved?.align_result?.mapping;
+    let parse;
+    let msgs;
+
+    if (canResume) {
+      parse = { messages: saved.script_messages };
+      msgs = saved.script_messages;
+    }
+
     // 1) SCRIPT：解析脚本
-    activeStep = "SCRIPT";
-    patchState(statePath, {
-      current_step: "SCRIPT",
-      status: PROJECT_STATUS.RUNNING,
-      project_id: projectId,
-      platform,
-      mode,
-    });
-    const parse = await callTool("parseScript", { scriptText, platform, mode });
-    let msgs = parse.messages || [];
-    // 关键修复：把语义决策（sticker/effect）合并进解析结果，否则贴纸与动效会在重解析时被丢弃
-    if (decisions && decisions.length)
-      msgs = applyDecisionsToMessages(msgs, decisions);
-    parse.messages = msgs;
-    patchState(statePath, {
-      current_step: "SCRIPT",
-      status: PROJECT_STATUS.SUCCEEDED,
-      script_messages: msgs,
-      script_text: scriptText,
-      project_id: projectId,
-      platform,
-      mode,
-    });
-    await persistArtifact(statePath, projectId, "SCRIPT", {
-      messages: msgs,
-      script_text: scriptText,
-      platform,
-      mode,
-    });
+    if (!canResume) {
+      activeStep = "SCRIPT";
+      patchState(statePath, {
+        current_step: "SCRIPT",
+        status: PROJECT_STATUS.RUNNING,
+        project_id: projectId,
+        platform,
+        mode,
+      });
+      parse = await callTool("parseScript", { scriptText, platform, mode });
+      msgs = parse.messages || [];
+      // 关键修复：把语义决策（sticker/effect）合并进解析结果，否则贴纸与动效会在重解析时被丢弃
+      if (decisions && decisions.length)
+        msgs = applyDecisionsToMessages(msgs, decisions);
+      parse.messages = msgs;
+      patchState(statePath, {
+        current_step: "SCRIPT",
+        status: PROJECT_STATUS.SUCCEEDED,
+        script_messages: msgs,
+        script_text: scriptText,
+        project_id: projectId,
+        platform,
+        mode,
+      });
+      await persistArtifact(statePath, projectId, "SCRIPT", {
+        messages: msgs,
+        script_text: scriptText,
+        platform,
+        mode,
+      });
+    }
 
     // 2) VOICEOVER：ASR + 节拍网格 + DP 对齐
     activeStep = "VOICEOVER";
-    patchState(statePath, {
-      current_step: "VOICEOVER",
-      status: PROJECT_STATUS.RUNNING,
-    });
-    // 轻量自动恢复（反馈⑨）：对齐属外部依赖（ASR/Python），瞬时故障可重试一次，环境类故障不重试。
-    let align;
-    let attempt = 0;
-    const MAX_ATTEMPTS = 2;
-    while (true) {
-      try {
-        align = await callTool("alignDP", {
-          audioPath,
-          scriptText,
-          model: "small",
-          hopLength: 512,
-        });
-        break;
-      } catch (e) {
-        attempt++;
-        const kind = classifyError(e);
-        if (kind === "transient" && attempt < MAX_ATTEMPTS) {
-          log(`alignDP 瞬时失败(${kind})，第 ${attempt} 次重试...`);
-          patchState(statePath, {
-            current_step: "VOICEOVER",
-            status: PROJECT_STATUS.RUNNING,
-            recover_attempt: attempt,
+    let align = canResume ? saved.align_result : null;
+    if (!align) {
+      patchState(statePath, {
+        current_step: "VOICEOVER",
+        status: PROJECT_STATUS.RUNNING,
+      });
+      // 轻量自动恢复（反馈⑨）：对齐属外部依赖（ASR/Python），瞬时故障可重试一次，环境类故障不重试。
+      let attempt = 0;
+      const MAX_ATTEMPTS = 2;
+      while (true) {
+        try {
+          align = await callTool("alignDP", {
+            audioPath,
+            scriptText,
+            model: "small",
+            hopLength: 512,
           });
-          continue;
+          break;
+        } catch (e) {
+          attempt++;
+          const kind = classifyError(e);
+          if (kind === "transient" && attempt < MAX_ATTEMPTS) {
+            log(`alignDP 瞬时失败(${kind})，第 ${attempt} 次重试...`);
+            patchState(statePath, {
+              current_step: "VOICEOVER",
+              status: PROJECT_STATUS.RUNNING,
+              recover_attempt: attempt,
+            });
+            continue;
+          }
+          throw e;
         }
-        throw e;
       }
     }
     patchState(statePath, {
@@ -122,7 +142,7 @@ export async function runProductionPlan({
     await persistArtifact(statePath, projectId, "VOICEOVER", align);
 
     // 3) 需要 AI 语义干预？
-    if (align.mapping_meta?.needs_review) {
+    if (align.mapping_meta?.needs_review && !allowApproximate) {
       const handoff = await callTool("aiReview", {
         scriptText,
         beatGrid: align.beat_grid,
@@ -148,6 +168,14 @@ export async function runProductionPlan({
         handoff: { align_result: align, handoff },
         statePath,
       };
+    }
+
+    if (align.mapping_meta?.needs_review && allowApproximate) {
+      patchState(statePath, {
+        quality_gate: "bypassed",
+        delivery_mode: "approximate_preview",
+        preview_warning: "该视频使用近似时间轴，未通过 ASR/对齐质量复核。",
+      });
     }
 
     // 4) 跳过渲染（仅对齐）
@@ -192,7 +220,12 @@ export async function runProductionPlan({
       duration: r.duration,
     });
 
-    return { done: true, output: out, statePath };
+    return {
+      done: true,
+      output: out,
+      statePath,
+      preview: !!(align.mapping_meta?.needs_review && allowApproximate),
+    };
   } catch (e) {
     // 生产级失败状态：标记当前步 FAILED，记录错误，后续步骤保持 PENDING（可由用户重跑）
     patchState(statePath, {

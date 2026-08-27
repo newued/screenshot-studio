@@ -16,11 +16,11 @@
 
 `open` / `genlink` 拼出的深链接形如 `http://localhost:5173/wechat/single?agent=1&script=<ENC>&audio=<ENC>`：
 
-| 参数 | 必填 | 说明 |
-|---|---|---|
-| `agent` | 是 | 固定 `1`：以 agent 模式打开，暴露「确认页面信息」按钮 |
-| `script` | 否 | 聊天脚本文本（`encodeURIComponent`），语法见下方 |
-| `audio` | 否 | 配音文件 URL，浏览器 fetch 后载入供用户预览 |
+| 参数     | 必填 | 说明                                                  |
+| -------- | ---- | ----------------------------------------------------- |
+| `agent`  | 是   | 固定 `1`：以 agent 模式打开，暴露「确认页面信息」按钮 |
+| `script` | 否   | 聊天脚本文本（`encodeURIComponent`），语法见下方      |
+| `audio`  | 否   | 配音文件 URL，浏览器 fetch 后载入供用户预览           |
 
 > **平台由 URL 路径决定（不是 query 参数）**：`/wechat/single`（单聊）、`/wechat/group`（群聊）、`/qq/chat`（QQ）。
 
@@ -40,6 +40,7 @@ B说：[视频未接]
 ```
 
 - 说话人 `A`=「我」；`B`/`C`... 依次为对方/群成员
+- 说话人前缀兼容 `A说：台词`、`[A] 台词` 和 `A: 台词`
 - 特殊消息用 `[类型：内容]` 括号语法
 - 决策 `sticker` 只填**贴纸文件名**（如 `angry_01.png`），不填完整路径；`effect` 取值 `pop_in` / `slide_in_left` / `slide_in_right` / `fade_in`；`emotion` 取值 `happy` / `sad` / `angry` / `surprise` / `neutral`
 

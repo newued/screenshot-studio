@@ -36,8 +36,9 @@ cd screenshot-studio
 node scripts/agent-up.mjs
 ```
 
-`agent-up` 会依次：配置 npm 镜像 → `npm install`（根目录 + `mcp-server/`）→ 配置 pip 清华源并 `pip install` Python 依赖 → 尽量自动安装 ffmpeg → **预下载 ASR 模型权重**（经 `https://hf-mirror.com` 镜像，禁 xet）→ 后台拉起 vite(:5173) 与 mcp-server(:9527)。两端口就绪即返回。
-新电脑只需先安装 Node.js/npm；`agent-up` 会依次探测并补齐 Python 3.10+、Python 音频依赖、FFmpeg、Node 依赖和 ASR 模型，然后后台拉起 vite(:5173) 与 mcp-server(:9527)。Windows 安装 Python 或 FFmpeg 后无需重开终端，启动器会主动探测常见安装目录；网络下载失败会明确标出缺失项，不会反复静默重试。3. **ASR 模型是说唱同步的必要条件**：`setup-asr small` 会预载 faster-whisper 权重；模型不可用时只能走 VAD/节拍近似对齐，不应把近似结果当成逐句严格同步。4. **音乐类配音**：系统优先使用 Whisper 词级时间戳，并用有序 DP 把一条脚本消息匹配到连续词群；如果歌词与脚本不同、多人声重叠或 ASR 置信度低，会进入 `AI_HANDOFF_JSON`，需人工确认时间轴后再渲染。
+新电脑只需先安装 Node.js/npm。`agent-up` 会探测并补齐 Python 3.10+、Python 音频依赖、FFmpeg、Node 依赖和 ASR 模型，然后后台拉起 vite(:5173) 与 mcp-server(:9527)。Windows 安装 Python 或 FFmpeg 后无需重开终端，启动器会主动探测常见安装目录；网络下载失败会明确标出缺失项。
+
+ASR 模型是说唱同步的必要条件：`setup-asr small` 会预载 faster-whisper 权重；模型不可用时只能走 VAD/节拍近似对齐，不应把近似结果当成逐句严格同步。音乐类配音优先使用 Whisper 词级时间戳和有序 DP；拖音、复唱、副歌和 ad-lib 会作为上下文交给 Agent 判断，歌词与脚本不一致或 ASR 置信度低时会进入 `AI_HANDOFF_JSON`。
 
 看到「全部就绪」即可使用。此后日常起后端只需 `node scripts/agent-bridge.mjs up`。
 
@@ -93,6 +94,8 @@ node scripts/agent-bridge.mjs run-page --out out.mp4   # 读网页确认状态�
 4. **音乐类配音**：能量持续，能量 VAD 只能切出单段，无法按句分段；逐句对齐依赖 ASR 模型，必要时用 `apply-fixes` 手动精修时间轴。
 5. **原生 canvas 二进制**：`@napi-rs/canvas` 提供主流平台预编译；冷门架构可能需本地 C++ 工具链编译。
 6. **配音必须用户自备**：按设计不内置 TTS，工具只负责把你的 MP3 与画面对齐。
+7. **质量闸门**：ASR 失败、低置信度或时间轴歧义默认不会交付正式视频；明确传入 `--allow-approximate` 才生成带警告标记的近似预览。
+8. **中断续做**：相同项目、脚本和音频重跑时会复用已有 SCRIPT/VOICEOVER 产物，不重复 ASR；Agent 修正后的 mapping 会继续用于渲染。
 
 ## 📁 目录结构
 

@@ -389,9 +389,9 @@ const TOOLS = {
     });
   },
 
-  aiApplyFix: async ({ mapping, fixes, beatGrid }) => {
+  aiApplyFix: async ({ mapping, fixes, beatGrid, snapToBeat = false }) => {
     const { aiApplyFix } = await import("./tools/aiReview.js");
-    return await aiApplyFix({ mapping, fixes, beatGrid });
+    return await aiApplyFix({ mapping, fixes, beatGrid, snapToBeat });
   },
 
   submitPage,

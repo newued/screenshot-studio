@@ -35,6 +35,34 @@ function pickReviewItems(mapping) {
     );
 }
 
+function normalizeAudioText(text) {
+  return String(text || "")
+    .toLowerCase()
+    .replace(/[\s，。！？、,.!?；;：:"'（）()《》…—\-~～·]/g, "");
+}
+
+function findRepeatedSegments(rawSegments) {
+  const repeated = [];
+  for (let i = 1; i < (rawSegments || []).length; i++) {
+    const previous = normalizeAudioText(rawSegments[i - 1]?.text);
+    const current = normalizeAudioText(rawSegments[i]?.text);
+    if (
+      previous &&
+      current &&
+      (previous === current ||
+        previous.includes(current) ||
+        current.includes(previous))
+    ) {
+      repeated.push({
+        first: i - 1,
+        second: i,
+        reason: "相邻重复，可能是副歌或复唱，不应直接判为错误",
+      });
+    }
+  }
+  return repeated;
+}
+
 /**
  * 交接包：供主 agent 读取并做语义对齐（不调 LLM）
  * @returns {Promise<{available:boolean, needs_total:number, reviewItems:Array, context:object, prompt:string}>}
@@ -60,17 +88,25 @@ export async function aiReview({
       start: s.start,
       end: s.end,
       text: (s.text || "").trim(),
+      words: (s.words || []).map((w) => ({
+        word: w.word,
+        start: w.start,
+        end: w.end,
+      })),
     })),
+    repeated_segments: findRepeatedSegments(rawSegments),
+    mapping: mapping || [],
   };
 
   // 给 agent 的指令（agent 用自己的 LLM 能力执行）
   const prompt =
     "你是音视频字幕/歌词对齐专家。输入音频可能是说唱/演唱，ASR 转写已严重漂移，不能逐字匹配。\n" +
-    "请基于【语义】把每条待仲裁台词归位到节拍网格时间轴上：\n" +
+    "请把整条时间轴作为一个整体审阅，基于【脚本权威文本 + ASR真实时间 + 顺序】归位；拖音、复唱、副歌重复和 ad-lib 不是错误：\n" +
     "1) 严格保持脚本原始顺序（message_id 升序）；\n" +
     "2) 每条 start/end 落在相邻拍点之间，start 对齐或略早于某拍，end 不超过下一条 start；\n" +
     "3) 若确实无法定位（纯 adlib/哼唱），match_type 标 unmatched 并给 proposed_at 取最近拍；\n" +
-    '4) 输出 JSON：{ "fixes": [ { "index":<原mapping索引>, "message_id":<n>, "start":<秒>, "end":<秒>, ' +
+    "4) 复唱句必须结合出现轮次和时间位置判断，不要把重复内容全部合并；拖音的 end 应覆盖实际发声，不要按字数截断；\n" +
+    '5) 输出 JSON：{ "fixes": [ { "index":<原mapping索引>, "message_id":<n>, "start":<秒>, "end":<秒>, ' +
     '"match_type":"exact|paraphrase|partial|adlib|unmatched", "calibrated_confidence":<0-1>, "note":"<理由>" } ] }';
 
   return {
@@ -98,7 +134,12 @@ export async function aiReview({
  * @param {Array} [params.beatGrid]    可选，用于把 start/end 吸附到最近拍点
  * @returns {Promise<{mapping:Array, mapping_meta:object, applied:number}>}
  */
-export async function aiApplyFix({ mapping, fixes, beatGrid }) {
+export async function aiApplyFix({
+  mapping,
+  fixes,
+  beatGrid,
+  snapToBeat = false,
+}) {
   const beats = (beatGrid || []).map((b) => +b).sort((a, b) => a - b);
   const snap = (t) => {
     if (!beats.length || t == null) return t;
@@ -124,10 +165,16 @@ export async function aiApplyFix({ mapping, fixes, beatGrid }) {
     if (!f) return m;
     const start =
       f.start != null
-        ? snap(f.start)
+        ? snapToBeat
+          ? snap(f.start)
+          : +Number(f.start).toFixed(3)
         : (m.rap_span?.start ?? m.proposed_at ?? null);
     const end =
-      f.end != null ? snap(f.end) : (m.rap_span?.end ?? m.proposed_at ?? null);
+      f.end != null
+        ? snapToBeat
+          ? snap(f.end)
+          : +Number(f.end).toFixed(3)
+        : (m.rap_span?.end ?? m.proposed_at ?? null);
     return {
       ...m,
       rap_span:

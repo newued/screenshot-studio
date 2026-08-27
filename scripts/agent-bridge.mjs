@@ -191,6 +191,7 @@ async function cmdRun(args) {
       `agent-out-${Date.now()}.mp4`,
     );
   const skipRender = !!args["--skip-render"];
+  const allowApproximate = !!args["--allow-approximate"];
 
   if (!audio) throw new Error("run 需要 --audio <音频路径或URL>");
   if (!script) throw new Error("run 需要 --script <脚本文本>");
@@ -215,6 +216,7 @@ async function cmdRun(args) {
     groupName: "",
     out,
     skipRender,
+    allowApproximate,
   });
   if (res.needsReview) {
     console.log("\n=== AI_HANDOFF_JSON ===");
@@ -230,7 +232,10 @@ async function cmdRun(args) {
     log("已跳过 render（--skip-render）。align 结果见 pipeline_state.json。");
     return;
   }
-  log("完成，输出：", out);
+  log(
+    res.preview ? "近似同步预览已生成，未通过质量复核：" : "完成，输出：",
+    out,
+  );
 }
 
 async function cmdApplyFixes(args) {
@@ -406,6 +411,7 @@ async function cmdRunPage(args) {
     groupName,
     out,
     skipRender: !!args["--skip-render"],
+    allowApproximate: !!args["--allow-approximate"],
   });
   if (res.needsReview) {
     console.log("\n=== AI_HANDOFF_JSON ===");
@@ -421,7 +427,10 @@ async function cmdRunPage(args) {
     log("已跳过 render（--skip-render）。");
     return;
   }
-  log("完成，输出：", out);
+  log(
+    res.preview ? "近似同步预览已生成，未通过质量复核：" : "完成，输出：",
+    out,
+  );
 }
 
 function cmdStatus() {
