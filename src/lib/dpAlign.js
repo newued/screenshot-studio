@@ -19,6 +19,8 @@
  * 使 DP 宁可 unmatched 也不接受坏配对。
  */
 
+import { pinyin } from 'pinyin-pro';
+
 // ==================== 文本相似度 ====================
 
 /**
@@ -93,7 +95,56 @@ function orderedSimilarity(a, b) {
 }
 
 /**
- * 三路融合相似度：字面 n-gram + 字符 Jaccard + 长度比
+ * 拼音相似度：将中文转为无声调拼音音节后计算 n-gram Jaccard
+ * 解决同音漂移问题（甩锅↔帅过、量子态↔两字塔 等）
+ */
+function pinyinSimilarity(a, b) {
+  const toPinyinSyllables = (s) => {
+    // 提取中文字符，逐字转拼音（无声调），拼成音节串
+    const chars = (s || "").match(/[\u4e00-\u9fff\u3400-\u4dbf]/g);
+    if (!chars || !chars.length) return "";
+    return chars
+      .map(c => {
+        const py = pinyin(c, { toneType: 'none', type: 'array' });
+        return Array.isArray(py) ? py[0] : py;
+      })
+      .join(" ");
+  };
+
+  const pA = toPinyinSyllables(a);
+  const pB = toPinyinSyllables(b);
+  if (!pA || !pB) return 0;
+
+  // 对拼音音节做 2-gram Jaccard
+  const syllablesA = pA.split(" ");
+  const syllablesB = pB.split(" ").filter(Boolean);
+  
+  // Build 2-gram sets on syllable arrays
+  const ngramsA = new Set();
+  const ngramsB = new Set();
+  for (let i = 0; i < syllablesA.length - 1; i++) ngramsA.add(syllablesA[i] + syllablesA[i + 1]);
+  for (let i = 0; i < syllablesB.length - 1; i++) ngramsB.add(syllablesB[i] + syllablesB[i + 1]);
+  
+  // If either has <2 syllables, fall back to unigram (single syllable match)
+  if (ngramsA.size === 0 && ngramsB.size === 0) {
+    // Both single-syllable: compare directly
+    return syllablesA[0] === syllablesB[0] ? 1 : 0;
+  }
+  if (ngramsA.size === 0 || ngramsB.size === 0) {
+    // One is single-syllable: check if it matches any syllable in the other
+    const singleSyllable = ngramsA.size === 0 ? syllablesA[0] : syllablesB[0];
+    const multiSyllables = ngramsA.size === 0 ? syllablesB : syllablesA;
+    return multiSyllables.includes(singleSyllable) ? 0.5 : 0;
+  }
+
+  let inter = 0;
+  for (const g of ngramsA) if (ngramsB.has(g)) inter++;
+  const union = ngramsA.size + ngramsB.size - inter;
+  return union > 0 ? inter / union : 0;
+}
+
+/**
+ * 五路融合相似度：字面 n-gram + 字符 Jaccard + 长度比 + 有序 + 拼音
  */
 function fusedSimilarity(scriptText, rapText) {
   const ngram = ngramSimilarity(scriptText, rapText, 2);
@@ -102,9 +153,10 @@ function fusedSimilarity(scriptText, rapText) {
   const lenB = extractChars(rapText).size;
   const lenRatio =
     lenA > 0 && lenB > 0 ? Math.min(lenA, lenB) / Math.max(lenA, lenB) : 0;
-  // 加权融合：n-gram 权重最高（最能反映文本相似性）
   const ordered = orderedSimilarity(scriptText, rapText);
-  return 0.35 * ordered + 0.3 * ngram + 0.25 * jaccard + 0.1 * lenRatio;
+  const phon = pinyinSimilarity(scriptText, rapText);
+  // 五路融合：字形(ordered+ngram+jaccard) + 长度 + 拼音
+  return 0.28 * ordered + 0.24 * ngram + 0.2 * jaccard + 0.08 * lenRatio + 0.2 * phon;
 }
 
 // ==================== DP 核心算法 ====================

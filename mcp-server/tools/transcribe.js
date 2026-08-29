@@ -7,8 +7,8 @@ import { writeFile, readFile, unlink, mkdtemp, rm } from "node:fs/promises";
 import { join } from "node:path";
 import { tmpdir } from "node:os";
 import { promisify } from "node:util";
-import { requirePython } from "./pyEnv.js";
 import { loadAsrConfig } from "./asrModel.js";
+import { ensureAsrPythonEnv } from "./asrModel.js";
 import { normalizeAudio } from "./audio.js";
 
 const execFileAsync = promisify(execFile);
@@ -42,7 +42,13 @@ export async function transcribe(audioPath, scriptText, opts = {}) {
 
   const normalized = await normalizeAudio(audioPath);
 
-  const py = await requirePython("faster_whisper");
+  const env = await ensureAsrPythonEnv({ heal: true });
+  if (!env.ok) {
+    throw new Error(
+      `ASR Python 环境异常（${env.reason}）：${env.message || ""}；可运行 \`python -m pip install "setuptools<81"\` 修复（run/run-page 会自动自愈）。`,
+    );
+  }
+  const py = env.py;
   const models = [...new Set(opts.fallbackModels || [model, "base", "tiny"])];
   const computeTypes = [...new Set([computeType, "float32"])];
   const failures = [];
@@ -87,9 +93,10 @@ print("OK")
 
       await writeFile(scriptPath, pyScript, "utf-8");
       try {
-        await execFileAsync(py, [scriptPath], {
+        const result = await execFileAsync(py, [scriptPath], {
           timeout: 300_000,
           maxBuffer: 1024 * 1024,
+          windowsHide: true,
         });
         const raw = JSON.parse(await readFile(outputPath, "utf-8"));
         await rm(tmpDir, { recursive: true, force: true });
@@ -102,6 +109,7 @@ print("OK")
         const detail = [
           error.code && `code=${error.code}`,
           error.stderr?.trim(),
+          error.stdout?.trim(),
           error.message,
         ]
           .filter(Boolean)

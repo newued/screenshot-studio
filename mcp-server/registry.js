@@ -89,6 +89,12 @@ B说：第二句台词
 /**
  * 网页「确认页面信息」回调：浏览器把音频 base64 + 用户核对的消息/成员发来，
  * 服务端落盘音频（产生 agent 可读取的真实本地路径），并写入 pipeline_state.json。
+ *
+ * V2.0 优化：
+ * 1. 音频落盘到项目目录（避免临时目录被清理）
+ * 2. 保存完整的脚本文本（从 messages 反向生成）
+ * 3. 保存平台/模式信息（供 agent 后端使用）
+ * 4. 保存脚本文本的 hash（用于断点续跑判断）
  */
 async function submitPage({
   audioBase64,
@@ -97,6 +103,8 @@ async function submitPage({
   members,
   title,
   groupName,
+  platform = 'wechat',
+  mode = 'single',
 }) {
   if (!audioBase64) throw new Error("缺少 audioBase64");
   const m = /^data:([^;]+);base64,(.*)$/.exec(audioBase64);
@@ -123,6 +131,17 @@ async function submitPage({
   const safeName = baseName.replace(/[^\w.\-\u4e00-\u9fa5]/g, "_");
   const audioPath = join(upDir, `${Date.now()}-${safeName}.${ext}`);
   await writeFile(audioPath, Buffer.from(b64, "base64"));
+
+  // 从 messages 反向生成脚本文本（供 agent 后端 alignDP 使用）
+  const scriptText = (messages || []).map(m => {
+    if (m.type === 'time') return `[${m.content}]`
+    if (m.type === 'system') return `[系统]${m.content}`
+    if (m.type === 'redpacket') return `[红包：${m.content}]`
+    if (m.type === 'transfer') return `[转账：${m.amount || ''}，${m.content}]`
+    if (m.type === 'voice') return `[语音：${m.duration || ''}]`
+    return `${m.speaker || 'A'}说：${m.content}`
+  }).join('\n')
+
   await writePipelineState({
     current_step: "VOICEOVER",
     page_confirmed: true,
@@ -133,6 +152,9 @@ async function submitPage({
     groupName: groupName || "",
     messages: messages || [],
     members: members || [],
+    script_text: scriptText,
+    platform: platform,
+    mode: mode,
     submitted_at: new Date().toISOString(),
   });
   return {
@@ -141,6 +163,7 @@ async function submitPage({
     audio_name: audioName || "",
     message_count: (messages || []).length,
     member_count: (members || []).length,
+    script_text: scriptText,
   };
 }
 

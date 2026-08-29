@@ -6,6 +6,7 @@ import { detectCapabilities } from './capabilities.js'
 import { loadAsrConfig, isAsrModelCached } from '../../mcp-server/tools/asrModel.js'
 import { existsSync } from 'node:fs'
 import { dirname, join } from 'node:path'
+import { execFileSync } from 'node:child_process'
 
 export function runDoctor() {
   const caps = detectCapabilities()
@@ -59,6 +60,32 @@ export function runDoctor() {
   })
   if (!asrCached && caps.asr) {
     warnings.push(`ASR 模型 "${asrCfg.model}" 未预载：离线环境 alignDP 将退化为 VAD/长度加权兜底（近似同步）；可联网机器跑 \`setup-asr\` 预下载。`)
+  }
+
+  // ASR Python 环境健康度（ctranslate2 能否 import；pkg_resources 是否被 setuptools>=81 移除导致 ASR 失效）
+  if (caps.asr) {
+    let envOk = false
+    let envDetail = '未检测到可用 Python'
+    const probe = 'import sys\ntry:\n    import ctranslate2\n    print("OK")\nexcept Exception as e:\n    print("ERR:" + repr(str(e)))'
+    for (const pyBin of ['python', 'py']) {
+      try {
+        const out = execFileSync(pyBin, ['-c', probe], { timeout: 20_000, stdio: ['ignore', 'pipe', 'pipe'] }).toString()
+        if (out.includes('OK')) { envOk = true; envDetail = 'ctranslate2 可 import（可逐句真同步）'; break }
+        const err = out.replace(/^ERR:/, '').trim()
+        if (/pkg_resources|setuptools/i.test(err)) { envDetail = err; break }
+        envDetail = err || 'ctranslate2 无法 import'; break
+      } catch {
+        // 该解释器不可用，尝试下一个
+      }
+    }
+    checks.push({ name: 'ASR Python 环境', detail: envOk ? envDetail : envDetail, ok: envOk })
+    if (!envOk) {
+      if (/pkg_resources|setuptools/i.test(envDetail)) {
+        warnings.push('ASR 环境异常：setuptools>=81 移除了 pkg_resources，ctranslate2 无法 import，ASR 退化为近似对齐。修复：`python -m pip install "setuptools<81"`（agent-up / setup-asr / run 会自动自愈）。')
+      } else {
+        warnings.push(`ASR Python 环境不可用：${envDetail}`)
+      }
+    }
   }
 
   return { ok: warnings.length === 0, caps, checks, warnings }

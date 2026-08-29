@@ -50,17 +50,19 @@ function candidatePythons() {
     } catch {
       /* 探测异常则忽略，继续用通用候选 */
     }
-    list.push(
-      "C:\\Python311\\python.exe",
-      "C:\\Python312\\python.exe",
-      "C:\\Python313\\python.exe",
-    );
+    // 优先探测用户本地安装的 Python（LOCALAPPDATA）
     const localPrograms = process.env.LOCALAPPDATA;
     if (localPrograms) {
       for (const ver of ["Python313", "Python312", "Python311", "Python310"]) {
         list.push(join(localPrograms, "Programs", "Python", ver, "python.exe"));
       }
     }
+    // 回退到常见全局安装路径
+    list.push(
+      "C:\\Python311\\python.exe",
+      "C:\\Python312\\python.exe",
+      "C:\\Python313\\python.exe",
+    );
   }
   list.push("python3", "python");
   return list;
@@ -99,9 +101,14 @@ export async function resolvePython(mod = "librosa") {
 export async function requirePython(mod = "librosa") {
   const py = await resolvePython(mod);
   if (!py) {
+    const packages =
+      mod === "faster_whisper"
+        ? "faster-whisper librosa soundfile numpy"
+        : "librosa soundfile numpy";
     throw new Error(
-      `未找到已安装 ${mod} 的 Python 解释器。请在含 ${mod} 的 Python 中安装：` +
-        ` pip install ${mod === "faster_whisper" ? "faster-whisper librosa soundfile numpy" : "librosa soundfile numpy"}` +
+      `未找到已安装 ${mod} 的 Python 解释器。请在含 ${mod} 的 Python 中安装：\n` +
+        `  清华源: python -m pip install -i https://pypi.tuna.tsinghua.edu.cn/simple ${packages}\n` +
+        `  阿里源: python -m pip install -i https://mirrors.aliyun.com/pypi/simple ${packages}\n` +
         `（当前 PATH 的 python 可能未安装依赖）。`,
     );
   }

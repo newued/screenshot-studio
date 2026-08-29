@@ -143,6 +143,7 @@
 - 现象：贴纸/动效在视频里「整批消失」或全是同一种。
 - 根因：`planner.runProductionPlan` 曾对 messages 重新 `parseScript`，把传入的 `sticker/effect` 整体丢弃；`project.buildProject` 又强制 `effect:'random'`。
 - 修复：决策经 `decisions.applyDecisionsToMessages` 合并进解析后消息；`buildProject` 仅在无决策时回退随机；`run` / `run-page` 均经 `--decisions` 传入（`run` 还新增 emotion→入场动效枚举的 `EFFECT_MAP`）。
+- **残余漏洞（本轮已修）**：`planner` 的 `canResume` 分支此前复用 `saved.script_messages` 时**跳过 decisions 合并**，导致"断点续跑"场景贴纸仍整批丢失。修复：resume 分支同样执行 `applyDecisionsToMessages`。**语义决策必须写入真相源（经 `applyCreative` 持久化到 `pipeline_state.json.messages`），而非仅作 `--decisions` 一次性入参**。
 
 ### 7.3 前端不得用共享 state 伪造「完成」
 
@@ -174,3 +175,35 @@
   - 入场：`canvasChat.js` 的 `pickEntrance(msg,i,mine)` 按 `mine` 分流 `ENTER_POOL_RIGHT` / `ENTER_POOL_LEFT`（自己的从右滑入、对方的从左滑入）；`semantic.js` 感叹号区分 `A→shake` / `B→swing`。
   - 出场：`DEFAULT_EXIT(p, mine, center)` 支持两种——`center=true` 朝屏心收（自己往左、对方往右），`center=false` 滑向各自一侧（自己往右、对方往左）。渲染层按消息索引 `it.i % 3 !== 0` 确定性混搭（约 2/3 中间收、1/3 各自侧），做到「有些中间收、有些滑向各自一侧」，而非千篇一律。
 - 防回归：引擎只产出变换/滤镜，渲染层（`canvasChat.js`）只 `applyTransform` + 设 `ctx.filter`（随 `save/restore` 复位，不影响标题栏与贴纸带）；不要在渲染层内联动效数学。
+
+### 7.7 resume 复用「脏对齐缓存」导致前半段空屏（先排缓存，勿甩锅 ASR）
+
+- 现象：视频前 ~30s 只有标题栏无内容，前 N 条消息被硬挤到同一起点；用户误以为 ASR 模型不够。
+- 根因：**不是 ASR 能力问题**。`planner.runProductionPlan` 的 `canResume` 分支（`script_text/audio_path/script_messages/align_result.mapping` 四者一致即复用）**不校验 align_result 是否来自完整的当前音频**。本次脏缓存成因：上一次对齐音频路径已失效（旧 error 指向不存在的 mp4），ASR 实际只转写出了后半段（30~56s），前 10 条消息全部 `unmatched → proposed_at=30` 挤到一处；resume 直接吃掉这份残缺结果。
+- 实证：用**当前有效音频**直接调 MCP `alignDP`，前 30s 语音全部识别（`unmatched=0`，第 1 条真实时间 1.38s）——`small` 模型完全够用，**无需升级 `medium/large`**。
+- 修复/排障顺序：① 先跑 `run --skip-render`（或直接 MCP `alignDP`）验证当前音频转写是否全覆盖（看 `unmatched_count`）；② 若为 0，清空 `pipeline_state.json` 的 `align_result/ai_handoff/mapping_meta`（保留 `page_confirmed/audio_path/messages` 不重开闸门），重跑 `run-page` 强制全量 `SCRIPT→VOICEOVER(重新ASR)→RENDER`；③ 若触发 `needs_review`，修正包 start/end 必须基于 `asr_segments` 真实演唱时刻（见 §7.4），不是节拍均分。
+- 模型选型结论：`small + int8 + cpu`（`mcp-server/asr-config.json` 默认）足够；仅当对**正常口播**也大量 unmatched 时才考虑升级，且先排除音频路径/缓存脏。
+
+### 7.8 页面提交的 messages 不带 sticker/effect，语义决策必须持久化写回真相源
+
+- 现象：视频无贴纸（首轮实测 23 条消息 `sticker` 命中 0 条），动效却正常。
+- 根因：`submitPage` 落盘 `messages` 只含 `{type, speaker, content}`；`cmdRunPage` 从前 reconstruction decisions 全空；`planner` 非 resume 分支虽调 `applyDecisionsToMessages`，空数组直接跳过。
+- 修复（双层）：① `cmdRunPage`（agent-bridge.mjs）——页面 messages 无 creative 字段时自动调 MCP `decide`（`src/lib/semantic.js` 规则兜底）；② `planner` resume 分支也合并 decisions（见 §7.2）。
+- **但规则兜底对「发疯吐槽 / 无强情绪词」脚本命中率极低（实测 23→1）**：此类脚本必须由 **LLM 决策**（agent 基于 `public/emojis/emoji_scenes.md` 适用场景产出 `creative` 数组，`sticker` 用 `/emojis/imgs/<file>` 路径），经 MCP `applyCreative`（严格校验贴纸在表情库、动效在 `EFFECT_ENUM`）**写回 `pipeline_state.json.messages/script_messages`**。
+- **原则：AI 语义决策必须持久化写回真相源，不是 `run --decisions` 一次性入参**——写回后网页预览与 `run-page` 两端都读到带贴纸消息，且 `creative_reason/confidence` 便于用户审阅回改。
+
+---
+
+## 用户偏好与环境约束
+
+> 此部分为全局用户偏好与环境信息，在每次会话启动时自动加载。
+
+### 语言偏好
+- 回答语言：偏好使用中文回复。
+- 例外：代码、特殊引用、专业名词保持原样（不翻译）。包括代码块、标识符、英文术语、专有名词、文件路径、URL 等。
+
+### 环境与工具链
+- 系统：Windows 11 64 位。
+- 已安装：Node.js、Python 3.13、Git 命令行工具（来自 Git for Windows）。
+- 命令行：默认使用系统自带的 Windows PowerShell；必要时可使用 Git Bash。
+- 执行任何命令前，请先考虑上述环境（如路径格式、命令可用性、shell 差异等）。

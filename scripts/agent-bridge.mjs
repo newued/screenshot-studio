@@ -271,6 +271,8 @@ async function cmdApplyFixes(args) {
     current_step: "SEMANTIC",
     status: PROJECT_STATUS.WAITING_AGENT,
     needs_review: !!result.mapping_meta.needs_review,
+    // 顶层 mapping_meta 同步为修正后的结果（防「状态显示 needs_review 但 mapping 已修正」的假象）
+    mapping_meta: result.mapping_meta,
     align_result: {
       ...state.align_result,
       mapping: result.mapping,
@@ -300,8 +302,15 @@ async function cmdApplyFixes(args) {
     const parse = state.script_messages
       ? { messages: state.script_messages }
       : { messages: state.messages || [] };
+    // 关键修复：渲染必须用 aiApplyFix 修正后的 mapping，而不是内存里修正前的 state.align_result
+    //（旧代码用 state.align_result，导致修正前「未匹配(30s)」的时间窗进入渲染 → 前段黑屏）。
+    const fixedAlign = {
+      ...state.align_result,
+      mapping: result.mapping,
+      mapping_meta: result.mapping_meta,
+    };
     await renderStage({
-      align: state.align_result,
+      align: fixedAlign,
       parse,
       script: state.script_text || buildScriptText(parse.messages),
       audio,
@@ -376,25 +385,38 @@ async function cmdRunPage(args) {
     );
   }
   log("页面已确认，读取最新提交的脚本/头像/名称/配音，进入后端...");
+
+  // 从 pipeline_state.json 读取所有必要信息
   const audio = state.audio_path;
   const messages = state.messages || [];
   const members = state.members || [];
-  // 群聊顶栏标题取群名称：state 里以 title 字段承载（网页确认时 group 模式传来的是群名）
-  const groupName =
-    mode === "group" ? state.groupName || state.title || "" : "";
-  const scriptText = buildScriptText(messages);
+  const title = state.title || "";
+  const groupName = state.groupName || "";
+  const scriptText = state.script_text || buildScriptText(messages);
 
   // 语义决策：优先用 --decisions 文件；否则从页面已确认的 messages（含 sticker/effect）重建
+  // 若页面 messages 不带任何 sticker/effect（网页通常只提交 text），走语义规则兜底（7.2 坑：
+  // 决策必须贯穿整条管线，否则贴纸/动效会在视频里整批消失）。
   let decisions = [];
   if (args["--decisions"]) {
     const raw = readArgVal(args["--decisions"]);
     decisions = typeof raw === "string" ? JSON.parse(raw) : raw;
   } else if (messages.length) {
-    decisions = messages.map((m) => ({
-      emotion: m.emotion || "neutral",
-      sticker: m.sticker || "",
-      effect: m.effect || "",
-    }));
+    const hasCreative = messages.some((m) => m.sticker || m.effect);
+    if (hasCreative) {
+      decisions = messages.map((m) => ({
+        emotion: m.emotion || "neutral",
+        sticker: m.sticker || "",
+        effect: m.effect || "",
+      }));
+    } else {
+      const res = await callTool("decide", { messages });
+      decisions = (res.decisions || []).map((d) => ({
+        emotion: d.emotion || "neutral",
+        sticker: d.sticker || "",
+        effect: d.effect || "",
+      }));
+    }
   }
 
   // 委托给 Planner 执行（页面模式同样走统一生产计划）

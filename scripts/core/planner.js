@@ -57,6 +57,11 @@ export async function runProductionPlan({
     if (canResume) {
       parse = { messages: saved.script_messages };
       msgs = saved.script_messages;
+      // 关键修复（7.2 残余）：resume 路径同样合并 AI 语义决策，
+      // 否则贴纸/动效在复用旧对齐结果时整体丢失。
+      if (decisions && decisions.length)
+        msgs = applyDecisionsToMessages(msgs, decisions);
+      parse.messages = msgs;
     }
 
     // 1) SCRIPT：解析脚本

@@ -54,14 +54,61 @@ export function applyAsrEnv() {
  * @param {string} [model] 模型名（缺省读配置）
  * @returns {Promise<{ok:boolean, model?:string, reason?:string, message?:string}>}
  */
-export async function ensureAsrModel(model = loadAsrConfig().model, { timeout = 600_000 } = {}) {
-  applyAsrEnv()
+/**
+ * ASR Python 环境自检 + 自愈（防回归 §7.1）：
+ * ctranslate2 4.5.0 的 __init__ 仍 `import pkg_resources`，而 setuptools>=81 已移除 pkg_resources，
+ * 导致 ctranslate2 无法 import、faster-whisper 整体失效、ASR 退化为「VAD/长度加权近似对齐」。
+ * best-effort 自愈：检测到该断裂则自动 `pip install "setuptools<81"`，并重检；heal=false 时仅探测。
+ * @param {{heal?:boolean}} [opts]
+ * @returns {Promise<{ok:boolean, py?:string, healed?:boolean, reason?:string, message?:string}>}
+ */
+export async function ensureAsrPythonEnv({ heal = true } = {}) {
   let py
   try {
     py = await requirePython('faster_whisper')
   } catch (e) {
     return { ok: false, reason: 'no_python', message: e.message }
   }
+  const probe = `import sys
+try:
+    import ctranslate2
+    print("OK")
+except Exception as e:
+    print("ERR:" + repr(str(e)))`
+  let stdout = ''
+  try {
+    ;({ stdout } = await execFileAsync(py, ['-c', probe], { timeout: 30_000 }))
+  } catch (e) {
+    return { ok: false, reason: 'import_check_failed', message: e.message }
+  }
+  if (stdout.includes('OK')) return { ok: true, py }
+  const err = stdout.replace(/^ERR:/, '').trim()
+  const isPkgResources = /pkg_resources|setuptools/i.test(err)
+  if (isPkgResources && heal) {
+    try {
+      await execFileAsync(py, ['-m', 'pip', 'install', 'setuptools<81'], { timeout: 180_000 })
+      const r2 = await execFileAsync(py, ['-c', probe], { timeout: 30_000 })
+      if (r2.stdout.includes('OK')) return { ok: true, py, healed: true }
+      return { ok: false, reason: 'pkg_resources_heal_failed', message: r2.stdout.trim() }
+    } catch (e) {
+      return { ok: false, reason: 'pkg_resources_heal_failed', message: e.message }
+    }
+  }
+  return {
+    ok: false,
+    reason: isPkgResources ? 'pkg_resources_missing' : 'asr_import_failed',
+    message: err,
+  }
+}
+
+export async function ensureAsrModel(model = loadAsrConfig().model, { timeout = 600_000 } = {}) {
+  applyAsrEnv()
+  // 先确保 ASR Python 环境（setuptools/pkg_resources 自愈），再下载权重
+  const env = await ensureAsrPythonEnv()
+  if (!env.ok) {
+    return { ok: false, reason: env.reason, message: env.message }
+  }
+  const py = env.py
   const tmpDir = await mkdtemp(join(tmpdir(), 'screenshort-asr-dl-'))
   const scriptPath = join(tmpDir, 'dl.py')
   const pyScript = `

@@ -220,7 +220,23 @@ Gospel-infused funk, dual powerful black male lead vocals, raspy soulful vocal t
     - 根因：① 后端 `buildProject` 把 `title` 硬编码为 `'聊天记录视频'`，完全忽略传入的标题；② 单聊页 `Single.jsx` 把 `projectTitle` 写成固定 `"微信单聊"`（应是 members[1] 对方昵称）；③ `canvasChat` 直接画 `ttl` 参数，未做规则派生。
     - 已修复：新增单一真相源 `src/lib/chatTitle.js` 的 `deriveChatTitle(mode, members, groupName)`——单聊取非"我"成员名、群聊取群名；`canvasChat.render` 顶栏、`buildProject`（后端渲染）、`VideoPipelinePanel`（网页预览/提交）三处统一调用该派生函数，`'聊天记录视频'` 默认值被强制覆盖；`submitPage` 新增 `groupName` 字段入状态。网页改昵称/头像/群名后随「确认页面信息」提交 `members/groupName`，视频顶栏即同步。
 
-13. **`run-page` 跳过「确认页面信息」闸门（跨会话陈旧确认泄漏）**
+13. **`run-page` 跳过了「确认页面信息」闸门（跨会话陈旧确认泄漏）——见条目 7；此处补充：`run-page` resume 复用脏对齐缓存，产出"后半段有画面、前半段全空"的废片**
+    - 现象：渲染出的视频前 ~30s 画面全空（只有标题栏），后半段才出现消息气泡与贴纸，且首 10 条消息被硬挤到同一起点。用户误以为 ASR 模型不够。
+    - 根因：**不是 ASR 能力问题**。`planner.runProductionPlan` 的 `canResume` 分支（scripts/core/planner.js）只要 `pipeline_state.json` 里存在 `align_result.mapping`（哪怕它来自上一次**残缺/脏的对齐结果**）就直接复用，**完全跳过重跑 `alignDP`**。本次脏缓存的成因：上次 `run-page` 对齐时音频路径失效（旧 error 指向"下载.mp4 不存在"），ASR 实际只转写出了后半段（30~56s），前 10 条消息因无 ASR 段全部标 `unmatched` → 全被 `proposed_at=30` 挤到一处。本次会话用**当前有效音频直接调 `alignDP`**，前 30s 全部正常识别出语音段（`unmatched=0`，第 0 条真实时间 1.38s 起）——**实证模型（`small`）完全够用，无需升级 `medium/large`**。
+    - 已固化动作（排障顺序）：
+      1. 先用 `node scripts/agent-bridge.mjs run --audio <当前有效音频> --script @剧本.txt --skip-render` 或直接调 MCP `alignDP` 验证当前音频的转写是否全覆盖（看 `mapping` 的 `unmatched_count`）。如果为 0，说明音频没问题，是缓存脏。
+      2. 清空脏缓存强制全量重对齐：临时删除 `pipeline_state.json` 里的 `align_result` / `ai_handoff` / `mapping_meta` 字段（保留 `page_confirmed / audio_path / messages` 不重开闸门），再跑 `run-page`。会走完整 `SCRIPT→VOICEOVER(重新ASR)→RENDER`。
+      3. 若触发 `needs_review`（`unmatched=0` 但存在 paraphrase/partial 低置信），**修正包的 start/end 必须基于 `align_result` 的 ASR words 真实演唱时刻**（见条目 5），不要按节拍网格均分；产 fixes → `apply-fixes`（自动续渲染）。
+    - 模型选型结论：**`small` + `int8` + `cpu` 默认配置足够**。`medium`/`large-v3` 在 CPU 上耗时 3~10x，对中文对话识别收益有限；只有当 ASR 对正常口播也大量 `unmatched` 时才值得升级，且需先排除"音频路径失效/缓存脏"这一类非模型问题。
+
+14. **页面提交的 `messages` 永不携带 `sticker/effect`，`run-page` 从页面数据重建 decisions 必然全空 → 贴纸整批消失**
+    - 现象：视频无任何语义贴纸（首轮实测 23 条消息 `sticker` 命中 0 条），动效却正常。
+    - 根因：`submitPage` 落盘的 `messages` 只含 `{type, speaker, content}`；`cmdRunPage` 原先从 `state.messages` 提取 `sticker/effect` 组成 decisions，全是空串。尽管 `planner` 的非 resume 分支调了 `applyDecisionsToMessages`，空数组时直接跳过，渲染自然无贴纸。
+    - 已修复（双层）：
+      1. `cmdRunPage`（scripts/agent-bridge.mjs）：页面 messages 无任何 creative 字段时，自动调 MCP `decide`（内置规则语义 `src/lib/semantic.js`）做规则兜底 decisions。
+      2. `planner.runProductionPlan` resume 分支：也合并 `decisions`，消除"复用缓存时贴纸被丢"的残余漏洞。
+      3. **但规则兜底对「发疯吐槽 / 无强情绪词」脚本命中率极低（实测 23 条只命中 1 条贴纸）**——按 §4 步骤 4，黑色幽默类必须由 **LLM 决策**（agent 基于 `public/emojis/emoji_scenes.md` 的适用场景）产出 `creative` 数组，并**经 MCP `applyCreative`（严格校验贴纸必须在表情库：`normSticker` 落在 `/emojis/imgs/<file>`）写回 `pipeline_state.json` 的 `messages`/`script_messages`**。
+    - **关键原则：AI 语义决策（贴纸/动效）必须持久化写回真相源，而不是仅作为 `run --decisions` 的一次性入参**。写回后网页预览与 `run-page` 两端都能读到带贴纸的消息；同时 `applyCreative` 的结构化字段（`creative_reason/confidence` 等）便于用户审阅/回改。决策文件应放系统临时目录，勿污染技能目录。
     - 现象：上一轮会话用户已在网页点过「确认页面信息」，`pipeline_state.json` 残留 `page_confirmed:true` + `audio_path`；下一轮 agent 直接 `run-page` 就出片，完全没让用户重新核对/确认，也跳过了 `AskUserQuestion` 闸门。
     - 根因：`open`/`genlink` 只把脚本作为 URL 参数注入浏览器，**从不改写 `pipeline_state.json`**，旧的人工确认状态不会因"新脚本注入"而失效。
     - 已修复（Runtime 强制，而非靠 agent 自觉）：`open` / `genlink` 一旦检测到注入了新脚本或音频，立即调用 `rearmGate()` 把 `page_confirmed` 置 `false` 并清空 `audio_path`，闸门重新拉起。此后任何 `run-page` 都会因守卫 `!(page_confirmed && audio_path)` 失败而报错「网页尚未确认」，逼 agent 先 `open` + 用 `AskUserQuestion` 等用户确认。
